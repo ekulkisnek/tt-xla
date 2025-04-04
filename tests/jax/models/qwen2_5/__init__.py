@@ -31,6 +31,8 @@ from .config import (
     create_partition_specs,
     create_device_mesh,
     supported_mesh_configs,
+    get_qwen2_7b_config,
+    get_small_config,
 )
 
 from .weight_loading import (
@@ -50,10 +52,14 @@ from .integration import (
 )
 
 from .register import (
-    register_tests,
     get_model_metadata,
     register_model_factory,
     get_model_example,
+)
+
+from .tester import (
+    Qwen25Tester,
+    Qwen25SmallTester,
 )
 
 __all__ = [
@@ -80,6 +86,8 @@ __all__ = [
     "create_partition_specs",
     "create_device_mesh",
     "supported_mesh_configs",
+    "get_qwen2_7b_config",
+    "get_small_config",
     
     # Weight loading
     "load_safetensors_index",
@@ -96,8 +104,11 @@ __all__ = [
     "load_and_run_inference",
     
     # Registration
-    "register_tests",
     "get_model_metadata",
     "register_model_factory",
     "get_model_example",
+    
+    # Tester
+    "Qwen25Tester",
+    "Qwen25SmallTester",
 ]
