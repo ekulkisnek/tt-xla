@@ -46,6 +46,7 @@ qwen2_5/
 ├── tensor_parallel.py       # Tensor-parallel model components
 ├── weight_loading.py        # Utilities for loading pretrained weights
 ├── direct_run.py            # Direct execution script
+├── gsm8k_eval.py            # GSM8K evaluation script
 ├── __init__.py              # Package initialization
 ├── README.md                # This documentation
 ├── AGENT_HISTORY.md         # Development history and issue tracking
@@ -148,6 +149,73 @@ You can download the model weights from Hugging Face:
 git clone https://huggingface.co/Qwen/Qwen2.5-7B
 ```
 
+## Auto-Model Registration
+
+This implementation provides an auto-model registration system inspired by the Hugging Face Transformers library, making it easy to load and use models without dealing with detailed configuration.
+
+### Using Auto Classes
+
+The `AutoQwenModel` and `AutoQwenModelTensorParallel` classes provide a convenient way to instantiate models:
+
+```python
+from tt_xla.tests.jax.models.qwen2_5 import (
+    AutoQwenModel, 
+    AutoQwenModelTensorParallel
+)
+
+# Load a standard model from configuration
+config = {"model_type": "qwen2_5", "hidden_size": 3584, ...}
+model = AutoQwenModel.from_config(config)
+
+# Or load directly from pretrained weights
+model = AutoQwenModel.from_pretrained("/path/to/qwen2.5-7b")
+
+# For tensor-parallel models
+# (specify mesh_shape as a tuple of (batch, model) dimensions)
+tp_model = AutoQwenModelTensorParallel.from_pretrained(
+    "/path/to/qwen2.5-7b", 
+    mesh_shape=(1, 8)
+)
+```
+
+### Simple Helper Function
+
+For even easier model creation, use the `get_model` helper function:
+
+```python
+from tt_xla.tests.jax.models.qwen2_5 import get_model
+import jax.numpy as jnp
+
+# Create a standard model
+model = get_model(
+    model_type="qwen2_5",
+    use_tensor_parallel=False,
+    dtype=jnp.bfloat16
+)
+
+# Create a tensor-parallel model
+tp_model = get_model(
+    model_type="qwen2_5",
+    use_tensor_parallel=True,
+    mesh_shape=(2, 4),  # 2x4 mesh
+    dtype=jnp.bfloat16
+)
+```
+
+### Model Registration
+
+The model registration system maps configuration types to model implementations:
+
+```python
+from tt_xla.tests.jax.models.qwen2_5 import MODEL_MAPPING, MODEL_TENSOR_PARALLEL_MAPPING
+
+# Available model types
+print(list(MODEL_MAPPING.keys()))  # ['qwen2_5']
+
+# Get a specific model class
+model_class = MODEL_MAPPING["qwen2_5"]
+```
+
 ## Usage
 
 ### Interactive Inference
@@ -201,6 +269,21 @@ Enter your prompt: Tell me more about its history.
 [Model response]
 ```
 
+### GSM8K Benchmark Evaluation
+
+To evaluate and compare standard and tensor-parallel model performance on the GSM8K benchmark:
+
+```bash
+# Run the GSM8K evaluation script
+python -m tt_xla.tests.jax.models.qwen2_5.gsm8k_eval \
+    --model_path /path/to/qwen2.5-7b \
+    --mesh_shape 1x8 \
+    --max_examples 50 \
+    --save_results results.json
+```
+
+This will evaluate both standard and tensor-parallel models on the GSM8K dataset and compare their outputs to ensure tensor parallelism produces identical results.
+
 ### Multi-Core Processing
 
 The implementation supports multi-core processing for tensor parallelism:
@@ -214,14 +297,6 @@ The implementation supports multi-core processing for tensor parallelism:
    ```bash
    python direct_run.py --mesh_shape 1x8
    ```
-
-### GSM8K Benchmark Verification
-
-For benchmark verification, use the script in the old_files directory:
-
-```bash
-python old_files/verify_gsm8k_scores.py --model_path /path/to/qwen2.5-7b
-```
 
 ### Additional Verification Scripts
 
@@ -248,7 +323,8 @@ python old_files/minimal_tp_test.py --model_path /path/to/qwen2.5-7b
 
 4. **Mesh Configuration Trade-offs**:
    - More devices in the model dimension (e.g., 1x8) = more model parallelism (better for larger models)
-   - More devices in the batch dimension (e.g., 8x1) = more data parallelism (better for throughput)
+   - More devices in the batch dimension (e.g., 8x4) = more batch parallelism (better for processing multiple inputs)
+   - Balance based on your specific use case and hardware characteristics
 
 ## How Tensor Parallelism Works
 

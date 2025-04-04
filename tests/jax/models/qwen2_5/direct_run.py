@@ -4,22 +4,31 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Simplified script to directly run the Qwen2.5-7B model without relying on the infra module.
+Simplified script to directly run the Qwen2.5-7B model using the auto model system.
 """
 
 import os
 import sys
 import argparse
+import logging
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 # Import the model implementation
-from model_implementation import Qwen2ForCausalLM
-from tensor_parallel import TensorParallelQwen2ForCausalLM, create_device_mesh
-from config import load_qwen_config, get_qwen2_7b_config, get_small_config
-from weight_loading import load_qwen_weights, init_model_from_weights
+from . import (
+    AutoQwenModel,
+    AutoQwenModelTensorParallel,
+    get_model,
+    load_qwen_config,
+    get_qwen2_7b_config,
+    get_small_config,
+    create_device_mesh
+)
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description='Run Qwen2.5 model directly')
@@ -27,10 +36,14 @@ def main():
                         help='Path to the model weights directory')
     parser.add_argument('--use_tensor_parallel', action='store_true',
                         help='Whether to use tensor parallelism')
-    parser.add_argument('--mesh_shape', type=str, default='1x1',
+    parser.add_argument('--mesh_shape', type=str, default='1x8',
                         help='Shape of the device mesh for tensor parallelism (batch, model)')
     parser.add_argument('--use_small_config', action='store_true',
                         help='Whether to use a small model config for testing')
+    parser.add_argument('--max_tokens', type=int, default=20,
+                        help='Maximum number of new tokens to generate')
+    parser.add_argument('--run_gsm8k', action='store_true',
+                        help='Run GSM8K benchmark instead of interactive mode')
     
     args = parser.parse_args()
     
@@ -59,6 +72,9 @@ def main():
         config = get_qwen2_7b_config()
         print("Using default Qwen2.5-7B configuration")
     
+    # Set model_type in config for auto classes
+    config["model_type"] = "qwen2_5"
+    
     # Print model details
     print("\nModel Configuration:")
     print(f"- Hidden size: {config['hidden_size']}")
@@ -70,21 +86,27 @@ def main():
     # Initialize model
     print("\nInitializing model...")
     
+    # Use our auto model system to initialize the model
+    dtype = jnp.bfloat16
+    param_dtype = jnp.bfloat16
+    
     if args.use_tensor_parallel:
-        # Create device mesh
-        mesh = create_device_mesh(mesh_shape)
-        
         print(f"\nTensor Parallelism Configuration:")
         print(f"- Mesh shape: {mesh_shape[0]}x{mesh_shape[1]}")
         print(f"- Total devices: {mesh_shape[0] * mesh_shape[1]}")
         
-        # Create tensor-parallel model
-        model = TensorParallelQwen2ForCausalLM(
+        # Initialize with the auto model system
+        model = get_model(
+            model_type="qwen2_5",
+            use_tensor_parallel=True,
+            mesh_shape=mesh_shape,
             config=config,
-            mesh=mesh,
-            dtype=jnp.bfloat16,
-            param_dtype=jnp.bfloat16
+            dtype=dtype,
+            param_dtype=param_dtype
         )
+        
+        # Create mesh for operations
+        mesh = create_device_mesh(mesh_shape)
         
         # Generate input for testing
         batch_size = max(1, mesh_shape[0])  # Match batch dimension to mesh
@@ -106,32 +128,14 @@ def main():
             print("\nRunning forward pass...")
             outputs = model.apply(params, sharded_input)
         
-        # Print some statistics about the output
-        # The model outputs a tuple - the first element should be the logits
-        if isinstance(outputs, tuple):
-            logits = outputs[0]
-            print("Model outputs a tuple. Using first element as logits.")
-        else:
-            try:
-                logits = outputs.logits
-                print("Model outputs an object with logits attribute.")
-            except AttributeError:
-                print(f"Unexpected output type: {type(outputs)}")
-                if hasattr(outputs, '__dict__'):
-                    print(f"Available attributes: {dir(outputs)}")
-                return 1
-        
-        print(f"Output logits shape: {logits.shape}")
-        print(f"Output logits mean: {jnp.mean(logits)}")
-        print(f"Output logits min: {jnp.min(logits)}")
-        print(f"Output logits max: {jnp.max(logits)}")
-        
     else:
-        # Create standard model
-        model = Qwen2ForCausalLM(
+        # Create standard model using auto model system
+        model = get_model(
+            model_type="qwen2_5",
+            use_tensor_parallel=False,
             config=config,
-            dtype=jnp.bfloat16,
-            param_dtype=jnp.bfloat16
+            dtype=dtype,
+            param_dtype=param_dtype
         )
         
         # Generate input for testing
@@ -146,26 +150,49 @@ def main():
         # Run a simple forward pass to test the model
         print("\nRunning forward pass...")
         outputs = model.apply(params, input_ids)
-        
-        # Print some statistics about the output
-        # The model outputs a tuple - the first element should be the logits
-        if isinstance(outputs, tuple):
-            logits = outputs[0]
-            print("Model outputs a tuple. Using first element as logits.")
-        else:
-            try:
-                logits = outputs.logits
-                print("Model outputs an object with logits attribute.")
-            except AttributeError:
-                print(f"Unexpected output type: {type(outputs)}")
-                if hasattr(outputs, '__dict__'):
-                    print(f"Available attributes: {dir(outputs)}")
-                return 1
-        
-        print(f"Output logits shape: {logits.shape}")
-        print(f"Output logits mean: {jnp.mean(logits)}")
-        print(f"Output logits min: {jnp.min(logits)}")
-        print(f"Output logits max: {jnp.max(logits)}")
+    
+    # Print output information
+    if isinstance(outputs, tuple):
+        logits = outputs[0]
+        print("Model outputs a tuple. Using first element as logits.")
+    else:
+        try:
+            logits = outputs.logits
+            print("Model outputs an object with logits attribute.")
+        except AttributeError:
+            print(f"Unexpected output type: {type(outputs)}")
+            if hasattr(outputs, '__dict__'):
+                print(f"Available attributes: {dir(outputs)}")
+            return 1
+    
+    print(f"Output logits shape: {logits.shape}")
+    print(f"Output logits mean: {jnp.mean(logits)}")
+    print(f"Output logits min: {jnp.min(logits)}")
+    print(f"Output logits max: {jnp.max(logits)}")
+    
+    # If loading from pretrained was requested and path is available, demonstrate it
+    if args.model_path and os.path.exists(args.model_path):
+        print("\nDemonstrating loading from pretrained weights...")
+        try:
+            if args.use_tensor_parallel:
+                print(f"Loading tensor-parallel model from {args.model_path}...")
+                model_pretrained = AutoQwenModelTensorParallel.from_pretrained(
+                    args.model_path,
+                    mesh_shape=mesh_shape,
+                    dtype=dtype,
+                    param_dtype=param_dtype
+                )
+                print("✅ Successfully loaded tensor-parallel model from pretrained weights")
+            else:
+                print(f"Loading standard model from {args.model_path}...")
+                model_pretrained = AutoQwenModel.from_pretrained(
+                    args.model_path,
+                    dtype=dtype,
+                    param_dtype=param_dtype
+                )
+                print("✅ Successfully loaded model from pretrained weights")
+        except Exception as e:
+            print(f"❌ Failed to load pretrained model: {str(e)}")
     
     print("\nTest completed successfully!")
     return 0

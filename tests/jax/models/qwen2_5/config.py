@@ -7,6 +7,7 @@ Configuration utilities for Qwen2.5-7B model.
 """
 
 import json
+import logging
 import os
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -14,6 +15,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 import numpy as np
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def load_qwen_config(model_path: str) -> Dict[str, Any]:
     """
@@ -27,10 +31,17 @@ def load_qwen_config(model_path: str) -> Dict[str, Any]:
     """
     config_path = os.path.join(model_path, 'config.json')
     if not os.path.exists(config_path):
+        logger.error(f"Config file not found at {config_path}")
         raise FileNotFoundError(f"Config file not found at {config_path}")
     
+    logger.info(f"Loading config from {config_path}")
     with open(config_path, 'r') as f:
         config = json.load(f)
+    
+    # Add model_type if not present
+    if "model_type" not in config:
+        config["model_type"] = "qwen2_5"
+        logger.info("Added default model_type='qwen2_5' to config")
     
     return config
 

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental import mesh_utils
 
-from model_implementation import (
+from .model_implementation import (
     RMSNorm,
     QwenAttention,
     QwenMLP,
@@ -339,7 +339,7 @@ class TensorParallelQwenAttention(nn.Module):
         )
         
         # Apply rotary embeddings from model_implementation
-        from model_implementation import apply_rotary_emb
+        from .model_implementation import apply_rotary_emb
         query_states, key_states = apply_rotary_emb(
             query_states, key_states, rotary_emb, position_ids
         )

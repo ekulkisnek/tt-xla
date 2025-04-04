@@ -3,88 +3,99 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Utilities for loading Qwen2.5-7B weights from HuggingFace safetensors format.
+Weight loading utilities for Qwen2.5 models.
 """
 
-import os
 import json
-import numpy as np
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax.sharding import PartitionSpec as P
-from safetensors import safe_open
-from typing import Dict, List, Optional, Tuple, Any, Union
-import time
-import sys
+from tqdm import tqdm
+import safetensors.numpy
 
-from tensor_parallel import get_partition_specs
+# Set up logging
+logger = logging.getLogger(__name__)
 
-def load_safetensors_index(model_path: str) -> Dict[str, str]:
+def load_safetensors_index(model_path: str) -> Dict[str, Any]:
     """
-    Load the safetensors index file for a model.
+    Load the safetensors index file which contains weight file mapping information.
     
     Args:
-        model_path: Path to the model directory
+        model_path: Path to the model directory containing model.safetensors.index.json
         
     Returns:
-        Dictionary mapping weight names to their safetensors file
+        Dictionary from the index file
     """
-    index_file = os.path.join(model_path, "model.safetensors.index.json")
-    if not os.path.exists(index_file):
-        raise FileNotFoundError(f"Safetensors index file not found at {index_file}")
+    index_path = os.path.join(model_path, 'model.safetensors.index.json')
+    if not os.path.exists(index_path):
+        logger.error(f"Safetensors index file not found at {index_path}")
+        raise FileNotFoundError(f"Safetensors index file not found at {index_path}")
+    
+    logger.info(f"Loading safetensors index from {index_path}")
+    with open(index_path, 'r') as f:
+        index = json.load(f)
+    
+    return index
+
+def convert_weight_name_to_flax(pt_name: str) -> str:
+    """
+    Convert a PyTorch weight name to the equivalent Flax parameter name.
+    
+    Args:
+        pt_name: PyTorch parameter name (from safetensors)
         
-    with open(index_file, "r") as f:
-        index_data = json.load(f)
+    Returns:
+        Flax parameter name
+    """
+    # Main parameter mapping dictionary
+    QWEN_PARAMETER_MAPPING = {
+        r'model\.embed_tokens\.weight': r'model/embed_tokens/embedding',
+        r'model\.norm\.weight': r'model/norm/weight',
+        r'lm_head\.weight': r'lm_head/kernel',
         
-    # Create mapping from parameter to filename
-    param_to_file = {}
-    if "weight_map" in index_data:
-        for param_name, filename in index_data["weight_map"].items():
-            param_to_file[param_name] = os.path.join(model_path, filename)
+        # Layer parameters
+        r'model\.layers\.(\d+)\.input_layernorm\.weight': r'model/layers_\1/input_layernorm/weight',
+        r'model\.layers\.(\d+)\.post_attention_layernorm\.weight': r'model/layers_\1/post_attention_layernorm/weight',
+        
+        # Attention parameters
+        r'model\.layers\.(\d+)\.self_attn\.q_proj\.weight': r'model/layers_\1/self_attn/q_proj/kernel',
+        r'model\.layers\.(\d+)\.self_attn\.q_proj\.bias': r'model/layers_\1/self_attn/q_proj/bias',
+        r'model\.layers\.(\d+)\.self_attn\.k_proj\.weight': r'model/layers_\1/self_attn/k_proj/kernel',
+        r'model\.layers\.(\d+)\.self_attn\.k_proj\.bias': r'model/layers_\1/self_attn/k_proj/bias',
+        r'model\.layers\.(\d+)\.self_attn\.v_proj\.weight': r'model/layers_\1/self_attn/v_proj/kernel',
+        r'model\.layers\.(\d+)\.self_attn\.v_proj\.bias': r'model/layers_\1/self_attn/v_proj/bias',
+        r'model\.layers\.(\d+)\.self_attn\.o_proj\.weight': r'model/layers_\1/self_attn/o_proj/kernel',
+        r'model\.layers\.(\d+)\.self_attn\.o_proj\.bias': r'model/layers_\1/self_attn/o_proj/bias',
+        
+        # MLP parameters
+        r'model\.layers\.(\d+)\.mlp\.gate_proj\.weight': r'model/layers_\1/mlp/gate_proj/kernel',
+        r'model\.layers\.(\d+)\.mlp\.gate_proj\.bias': r'model/layers_\1/mlp/gate_proj/bias',
+        r'model\.layers\.(\d+)\.mlp\.up_proj\.weight': r'model/layers_\1/mlp/up_proj/kernel',
+        r'model\.layers\.(\d+)\.mlp\.up_proj\.bias': r'model/layers_\1/mlp/up_proj/bias',
+        r'model\.layers\.(\d+)\.mlp\.down_proj\.weight': r'model/layers_\1/mlp/down_proj/kernel',
+        r'model\.layers\.(\d+)\.mlp\.down_proj\.bias': r'model/layers_\1/mlp/down_proj/bias',
+    }
+    
+    # Apply the mapping
+    flax_name = pt_name
+    for pt_pattern, flax_pattern in QWEN_PARAMETER_MAPPING.items():
+        if re.match(pt_pattern, pt_name):
+            flax_name = re.sub(pt_pattern, flax_pattern, pt_name)
+            break
+    
+    if flax_name == pt_name:
+        logger.warning(f"No mapping found for parameter: {pt_name}")
     else:
-        raise ValueError(f"Invalid index file format: 'weight_map' not found in {index_file}")
-            
-    return param_to_file
-
-def convert_weight_name_to_flax(name: str) -> str:
-    """
-    Convert transformer weight names to Flax format.
-    
-    Args:
-        name: Parameter name in HuggingFace format
+        logger.debug(f"Mapped parameter {pt_name} → {flax_name}")
         
-    Returns:
-        Parameter name in Flax format
-    """
-    # Remove model prefix if present
-    if name.startswith("model."):
-        name = name[len("model."):]
-    
-    # Handle special cases 
-    if name == "norm.weight":
-        return "norm/weight"
-    
-    # Replace "." with "/" for Flax nested dict format
-    name = name.replace(".", "/")
-    
-    # Handle self attention naming
-    name = name.replace("self_attn/", "self_attn/")
-    
-    # Handle layer indices
-    if "layers/" in name:
-        layer_idx = name.split("layers/")[1].split("/")[0]
-        name = name.replace(f"layers/{layer_idx}", f"layers_{layer_idx}")
-    
-    # Handle specific cases for final norm and LM head
-    if "norm/" in name:
-        name = name.replace("norm/", "norm/")
-    
-    # Handle the language model head weights
-    if "lm_head/" in name:
-        name = name.replace("lm_head/", "lm_head/")
-        
-    return name
+    return flax_name
 
 def load_qwen_weights(
     model_path: str,
