@@ -1,0 +1,10 @@
+{
+  "model": "Qwen2.5 Lite (Small Config, Real Components)",
+  "mesh_shape": "1x2",
+  "max_examples": 1,
+  "max_new_tokens": 50,
+  "temperature": 0.0,
+  "accuracy": 0,
+  "eval_time": 0.024108171463012695,
+  "results": []
+}

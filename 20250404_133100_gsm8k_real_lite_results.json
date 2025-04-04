@@ -1,0 +1,10 @@
+2025-04-04 13:31:00.873 - GSM8K_REAL_LITE - DEBUG - Logging initialized with level: 10
+2025-04-04 13:31:00.873 - GSM8K_REAL_LITE - INFO - Creating device mesh with shape (1, 2)
+2025-04-04 13:31:00.873 - jax._src.xla_bridge - DEBUG - No jax_plugins namespace packages available
+2025-04-04 13:31:00.875 - jax._src.xla_bridge - DEBUG - Initializing backend 'cpu'
+2025-04-04 13:31:00.879 - jax._src.xla_bridge - DEBUG - Backend 'cpu' initialized
+2025-04-04 13:31:00.879 - jax._src.xla_bridge - DEBUG - Initializing backend 'rocm'
+2025-04-04 13:31:00.879 - jax._src.xla_bridge - INFO - Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+2025-04-04 13:31:00.879 - jax._src.xla_bridge - DEBUG - Initializing backend 'tpu'
+2025-04-04 13:31:00.880 - jax._src.xla_bridge - INFO - Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: dlopen(libtpu.so, 0x0001): tried: 'libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OSlibtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache), 'libtpu.so' (no such file), '/usr/local/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache)
+2025-04-04 13:31:00.881 - jax._src.xla_bridge - DEBUG - Clearing JAX backend caches.

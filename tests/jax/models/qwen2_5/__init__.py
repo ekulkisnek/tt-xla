@@ -44,6 +44,7 @@ from .weight_loading import (
     convert_weight_name_to_flax,
     load_qwen_weights,
     init_model_from_weights,
+    load_safetensors_into_params,
 )
 
 from .integration import (
@@ -236,6 +237,7 @@ __all__ = [
     "convert_weight_name_to_flax",
     "load_qwen_weights",
     "init_model_from_weights",
+    "load_safetensors_into_params",
     
     # Auto classes
     "AutoQwenModel",

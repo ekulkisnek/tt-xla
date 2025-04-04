@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import re
+import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import jax
@@ -41,6 +43,10 @@ def load_safetensors_index(model_path: str) -> Dict[str, Any]:
     logger.info(f"Loading safetensors index from {index_path}")
     with open(index_path, 'r') as f:
         index = json.load(f)
+    
+    # Extract the weight map for easier use
+    if "weight_map" in index:
+        return index["weight_map"]
     
     return index
 
@@ -156,8 +162,15 @@ def load_qwen_weights(
         # Track which parameters we've loaded
         loaded_params = set()
         
-        # Collect unique files
-        all_files = set(param_file_map.values())
+        # Collect unique files - ensuring they're absolute paths
+        all_files = set()
+        for file_name in param_file_map.values():
+            if not os.path.isabs(file_name):
+                file_path = os.path.join(model_path, file_name)
+            else:
+                file_path = file_name
+            all_files.add(file_path)
+        
         print(f"Loading weights from {len(all_files)} safetensors file(s)")
         sys.stdout.flush()
         
@@ -189,8 +202,13 @@ def load_qwen_weights(
                 print(f"Loading weights: {i}/{total_params} parameters ({percent:.1f}%) - {elapsed:.1f}s elapsed")
                 sys.stdout.flush()
                 last_progress_time = current_time
-                
-            file_path = param_file_map[name]
+            
+            # Get file name from param_file_map and convert to full path if needed
+            file_name = param_file_map[name]
+            if not os.path.isabs(file_name):
+                file_path = os.path.join(model_path, file_name)
+            else:
+                file_path = file_name
             
             # Create file handle if we don't have one yet
             if file_path not in file_handles:
@@ -201,6 +219,7 @@ def load_qwen_weights(
                     sys.stdout.flush()
                     last_file_time = time.time()
                     
+                    from safetensors import safe_open
                     file_handles[file_path] = safe_open(file_path, framework="numpy")
                     
                     # Report how long it took to open the file
@@ -354,6 +373,164 @@ def init_model_from_weights(
     print("Model weights loaded successfully")
     
     return model, params
+
+def load_safetensors_into_params(model_params, weight_map, safetensors_dir):
+    """
+    Load weights from safetensors files into model parameters with filtering.
+    
+    Args:
+        model_params: Initial model parameters structure
+        weight_map: Dictionary mapping parameter names to file paths
+        safetensors_dir: Directory containing safetensors files
+        
+    Returns:
+        Updated model parameters with loaded weights
+    """
+    import sys
+    import time
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    
+    print(f"Loading {len(weight_map)} parameters from safetensors files")
+    start_time = time.time()
+    
+    # Track file handles to avoid repeatedly opening the same file
+    file_handles = {}
+    
+    # Try different separator formats to find what works with this model
+    for sep in ['/', '.']:
+        try:
+            # Convert params to mutable dict for updating
+            params_dict = flatten_dict(model_params, sep=sep)
+            print(f"Successfully flattened parameters with separator '{sep}'")
+            break
+        except Exception as e:
+            print(f"Failed to flatten with separator '{sep}': {e}")
+    else:
+        # Default to '/' if none worked
+        print("Using default separator '/' for flattening")
+        params_dict = flatten_dict(model_params, sep='/')
+    
+    # Debug: show initial param structure
+    print(f"Initial model parameters structure has {len(params_dict)} entries")
+    for i, key in enumerate(sorted(list(params_dict.keys()))[:5]):
+        print(f"  Sample param {i}: {key}")
+    
+    # Create a lookup dictionary for parameter names
+    param_lookup = {}
+    for key in params_dict.keys():
+        # Create normalized key variations for lookup
+        # 1. Original key
+        param_lookup[key] = key
+        
+        # 2. Convert / to .
+        if '/' in key:
+            param_lookup[key.replace('/', '.')] = key
+        
+        # 3. Convert . to /
+        if '.' in key:
+            param_lookup[key.replace('.', '/')] = key
+        
+        # 4. Last component only
+        last_component = key.split('/')[-1] if '/' in key else key.split('.')[-1] if '.' in key else key
+        if last_component not in param_lookup:  # Don't overwrite if already exists
+            param_lookup[last_component] = key
+    
+    # Count successful parameter updates
+    success_count = 0
+    failed_count = 0
+    
+    # Process parameters
+    for i, (pt_name, file_path) in enumerate(tqdm(weight_map.items(), desc="Loading weights")):
+        # Log progress periodically
+        if i % 50 == 0:
+            print(f"Loaded {i}/{len(weight_map)} parameters ({i/len(weight_map)*100:.1f}%)")
+            sys.stdout.flush()
+        
+        # Get the full file path
+        full_path = os.path.join(safetensors_dir, os.path.basename(file_path))
+        
+        # Create file handle if we don't have one yet
+        if full_path not in file_handles:
+            try:
+                file_handles[full_path] = safetensors.numpy.safe_open(full_path, framework="numpy")
+            except Exception as e:
+                print(f"Error opening {full_path}: {e}")
+                continue
+        
+        # Get the file handle
+        f = file_handles[full_path]
+        
+        try:
+            # Convert the PyTorch parameter name to Flax
+            flax_name = convert_weight_name_to_flax(pt_name)
+            
+            # Check if we have a direct match in our lookup
+            if flax_name in param_lookup:
+                param_path = param_lookup[flax_name]
+            else:
+                # Try with separator conversion
+                for sep_from, sep_to in [('/', '.'), ('.', '/')]:
+                    converted_name = flax_name.replace(sep_from, sep_to)
+                    if converted_name in param_lookup:
+                        param_path = param_lookup[converted_name]
+                        print(f"Found parameter with converted path: {flax_name} -> {converted_name}")
+                        break
+                else:
+                    # Try last component matching
+                    last_component = flax_name.split('/')[-1] if '/' in flax_name else flax_name.split('.')[-1] if '.' in flax_name else flax_name
+                    if last_component in param_lookup:
+                        param_path = param_lookup[last_component]
+                        print(f"Matched by last component: {flax_name} -> {last_component}")
+                    else:
+                        # Try looking for similar paths
+                        similar_paths = [k for k in params_dict.keys() if last_component in k]
+                        if similar_paths:
+                            print(f"Parameter {flax_name} not found, but found similar paths: {similar_paths[:3]}")
+                        else:
+                            print(f"Parameter {flax_name} not found in model, skipping")
+                        failed_count += 1
+                        continue
+            
+            # Load the tensor
+            tensor = f.get_tensor(pt_name)
+            
+            # Transpose weight matrices for linear layers (Flax uses different convention)
+            if 'kernel' in flax_name and len(tensor.shape) == 2:
+                print(f"Transposing weight matrix for {flax_name}")
+                tensor = tensor.T
+            
+            # Validate parameter shapes
+            target_shape = params_dict[param_path].shape if hasattr(params_dict[param_path], 'shape') else None
+            if target_shape is not None and tensor.shape != target_shape:
+                print(f"Warning: Shape mismatch for {param_path}. Expected {target_shape}, got {tensor.shape}.")
+                # Try to reshape if possible
+                if np.prod(tensor.shape) == np.prod(target_shape):
+                    print(f"Attempting to reshape {tensor.shape} -> {target_shape}")
+                    tensor = tensor.reshape(target_shape)
+            
+            # Update the parameter
+            params_dict[param_path] = jnp.array(tensor)
+            success_count += 1
+            
+        except Exception as e:
+            print(f"Error loading parameter {pt_name}: {e}")
+            failed_count += 1
+    
+    # No need to close file handles for safetensors - they don't have a close method
+    # The handles will be garbage collected when they go out of scope
+    
+    # Try to unflatten using the same separator used for flatten
+    try:
+        updated_params = unflatten_dict(params_dict, sep=sep)
+    except Exception as e:
+        print(f"Error unflattening with separator '{sep}': {e}")
+        # Try with default separator
+        updated_params = unflatten_dict(params_dict, sep='/')
+    
+    print(f"✅ Weight loading completed in {time.time() - start_time:.2f} seconds")
+    print(f"Successfully loaded {success_count}/{len(weight_map)} parameters, {failed_count} failed")
+    
+    return updated_params
 
 def load_qwen_weights_v2(*args, **kwargs):
     """Alias for load_qwen_weights for compatibility."""

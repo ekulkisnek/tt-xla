@@ -131,9 +131,22 @@ class QwenAttention(nn.Module):
         batch_size, seq_length = hidden_states.shape[:2]
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]
         
+        # Determine whether to adapt to actual weight shapes
+        adapt_to_weights = self.config.get("qwen_attention_heads_match_actual_weights", False)
+        
+        # Calculate features sizes based on config or adapt to real weights
+        if adapt_to_weights:
+            # Set dimensions to match loaded weights
+            q_features = self.config["hidden_size"]
+            kv_features = self.config["hidden_size"]
+        else:
+            # Use config-based values
+            q_features = self.config["num_attention_heads"] * head_dim
+            kv_features = self.config["num_key_value_heads"] * head_dim
+        
         # Project inputs to queries, keys, and values
         q_proj = nn.Dense(
-            features=self.config["num_attention_heads"] * head_dim,
+            features=q_features,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=True,
@@ -142,7 +155,7 @@ class QwenAttention(nn.Module):
         )
         
         k_proj = nn.Dense(
-            features=self.config["num_key_value_heads"] * head_dim,
+            features=kv_features,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=True,
@@ -151,7 +164,7 @@ class QwenAttention(nn.Module):
         )
         
         v_proj = nn.Dense(
-            features=self.config["num_key_value_heads"] * head_dim,
+            features=kv_features,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=True,
@@ -173,16 +186,25 @@ class QwenAttention(nn.Module):
         key_states = k_proj(hidden_states)
         value_states = v_proj(hidden_states)
         
-        # Reshape for multi-head attention
-        query_states = query_states.reshape(
-            batch_size, seq_length, self.config["num_attention_heads"], head_dim
-        )
-        key_states = key_states.reshape(
-            batch_size, seq_length, self.config["num_key_value_heads"], head_dim
-        )
-        value_states = value_states.reshape(
-            batch_size, seq_length, self.config["num_key_value_heads"], head_dim
-        )
+        # Adapt reshaping based on weight dimensions
+        if adapt_to_weights:
+            # With adapted weights, adjust for expected dimensions
+            # Use the full hidden size without breaking into heads yet
+            # We'll manually split into heads after rotation
+            query_states = query_states.reshape(batch_size, seq_length, -1)
+            key_states = key_states.reshape(batch_size, seq_length, -1)
+            value_states = value_states.reshape(batch_size, seq_length, -1)
+        else:
+            # Use original reshaping to multi-head
+            query_states = query_states.reshape(
+                batch_size, seq_length, self.config["num_attention_heads"], head_dim
+            )
+            key_states = key_states.reshape(
+                batch_size, seq_length, self.config["num_key_value_heads"], head_dim
+            )
+            value_states = value_states.reshape(
+                batch_size, seq_length, self.config["num_key_value_heads"], head_dim
+            )
         
         # Setup position IDs if not provided
         if position_ids is None:
@@ -196,10 +218,40 @@ class QwenAttention(nn.Module):
             theta=self.config.get("rope_theta", 10000.0)
         )
         
-        # Apply rotary embeddings
-        query_states, key_states = apply_rotary_emb(
-            query_states, key_states, rotary_emb, position_ids
-        )
+        # For adapted weights, reshape after rotary embeddings
+        if adapt_to_weights:
+            # Apply custom rotary embedding that works on the full hidden size
+            # without needing to split into heads first
+            
+            # Manually reshape to (batch, seq, heads, head_dim) for rotary embeddings
+            # Use all dimensions for query, but only first num_key_value_heads for keys/values
+            tmp_query = query_states.reshape(batch_size, seq_length, self.config["num_attention_heads"], head_dim)
+            tmp_key = key_states.reshape(batch_size, seq_length, self.config["num_attention_heads"], head_dim)
+            
+            # Apply rotary embeddings to these temporary reshaped tensors
+            tmp_query, tmp_key = apply_rotary_emb(tmp_query, tmp_key, rotary_emb, position_ids)
+            
+            # Reshape back to (batch, seq, hidden) format
+            query_states = tmp_query.reshape(batch_size, seq_length, -1)
+            key_states = tmp_key.reshape(batch_size, seq_length, -1)
+            
+            # Now we can safely reshape to the multi-head format
+            query_states = query_states.reshape(
+                batch_size, seq_length, self.config["num_attention_heads"], head_dim
+            )
+            # For key and value, use the hidden size and manually adjust to ensure dimensions match
+            kv_heads = self.config["num_key_value_heads"]
+            key_states = key_states[:, :, :kv_heads*head_dim].reshape(
+                batch_size, seq_length, kv_heads, head_dim
+            )
+            value_states = value_states[:, :, :kv_heads*head_dim].reshape(
+                batch_size, seq_length, kv_heads, head_dim
+            )
+        else:
+            # Apply standard rotary embeddings
+            query_states, key_states = apply_rotary_emb(
+                query_states, key_states, rotary_emb, position_ids
+            )
         
         # Handle KV caching
         if past_key_value is not None:
@@ -604,6 +656,11 @@ class Qwen2ForCausalLM(nn.Module):
         Returns:
             Logits and optionally past_key_values, hidden_states, and attentions
         """
+        # Handle missing arguments that might come from HF-based code
+        if 'return_dict' in self.config:
+            # Ignore return_dict to avoid errors
+            pass
+            
         # Apply the base model
         outputs = Qwen2Model(
             config=self.config,
