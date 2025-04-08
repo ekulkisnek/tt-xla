@@ -26,6 +26,17 @@ from .tensor_parallel import (
 )
 from .weight_loading import convert_qwen25_checkpoint
 
+# Default partition rules for Qwen2.5 for tensor parallelism
+partition_rules_qwen25 = {
+    "self_attn.q_proj": "colwise",
+    "self_attn.k_proj": "colwise",
+    "self_attn.v_proj": "colwise",
+    "self_attn.o_proj": "rowwise",
+    "mlp.gate_proj": "colwise",
+    "mlp.up_proj": "colwise",
+    "mlp.down_proj": "rowwise",
+}
+
 __all__ = [
     "Qwen25Config",
     "FlaxQwen25Model",
@@ -35,4 +46,5 @@ __all__ = [
     "get_partition_specs",
     "FlaxQwen25WithSharding",
     "convert_qwen25_checkpoint",
+    "partition_rules_qwen25",
 ] 

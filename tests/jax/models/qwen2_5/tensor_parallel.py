@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 from flax import nnx
+import numpy as np
 
 
 def create_device_mesh(mesh_shape: Tuple[int, ...] = None, axis_names: Tuple[str, ...] = None) -> Mesh:
@@ -42,8 +43,14 @@ def create_device_mesh(mesh_shape: Tuple[int, ...] = None, axis_names: Tuple[str
     if axis_names is None:
         axis_names = ('data', 'model')
     
-    devices = jnp.array(jax.devices()).reshape(mesh_shape)
-    return Mesh(devices, axis_names)
+    devices = jax.devices()
+    if len(devices) != mesh_shape[0] * mesh_shape[1]:
+        # If meshape doesn't match device count, adjust it
+        mesh_shape = (1, len(devices))
+    
+    # Create a list of devices and reshape it to the mesh shape
+    device_mesh = np.array(devices).reshape(mesh_shape)
+    return Mesh(device_mesh, axis_names)
 
 
 def with_sharding_constraint(x, partitioning):

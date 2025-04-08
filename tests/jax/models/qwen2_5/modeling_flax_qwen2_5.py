@@ -128,8 +128,9 @@ def create_sinusoidal_positions(num_pos, dim):
     freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
 
     emb = np.concatenate((freqs, freqs), axis=-1)
-    out = np.concatenate((np.sin(emb)[:, None, :], np.cos(emb)[:, None, :]), axis=-1)
-    return jnp.array(out[:, :, :dim])
+    sin_emb = np.sin(emb)[..., None, :]  # Add head dimension
+    cos_emb = np.cos(emb)[..., None, :]  # Add head dimension
+    return jnp.asarray(np.concatenate((sin_emb, cos_emb), axis=-1)[..., :dim])
 
 
 def rotate_half(tensor):
@@ -141,6 +142,12 @@ def rotate_half(tensor):
 
 
 def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
+    # Match the shapes for broadcasting
+    # tensor shape is typically (batch, seq_len, num_heads, head_dim)
+    # Ensure sin_pos and cos_pos have compatible shapes
+    sin_pos = jnp.expand_dims(sin_pos, axis=2) if sin_pos.ndim < tensor.ndim else sin_pos
+    cos_pos = jnp.expand_dims(cos_pos, axis=2) if cos_pos.ndim < tensor.ndim else cos_pos
+    
     return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
 
 
@@ -172,7 +179,12 @@ class FlaxQwen25RotaryEmbedding(nn.Module):
 
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
+        # Split along the last dimension
         sin_pos, cos_pos = jnp.split(sincos, 2, axis=-1)
+        
+        # Reshape sin_pos and cos_pos to match key and query shape for proper broadcasting
+        sin_pos = sin_pos.reshape(sin_pos.shape[:2] + (1, sin_pos.shape[-1]))
+        cos_pos = cos_pos.reshape(cos_pos.shape[:2] + (1, cos_pos.shape[-1]))
 
         key = apply_rotary_pos_emb(key, sin_pos, cos_pos)
         query = apply_rotary_pos_emb(query, sin_pos, cos_pos)

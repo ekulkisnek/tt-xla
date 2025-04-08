@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from transformers import AutoTokenizer
 
-from tt_xla.tests.jax.models.qwen2_5 import (
+from tests.jax.models.qwen2_5 import (
     convert_qwen25_checkpoint,
     create_device_mesh,
     partition_rules_qwen25,
@@ -117,7 +117,11 @@ def main():
     dtype = jnp.bfloat16 if args.use_bfloat16 else jnp.float16
     
     # Create device mesh for tensor parallelism
-    mesh = create_device_mesh(num_partitions=args.num_partitions)
+    if args.num_partitions is not None:
+        mesh_shape = (1, args.num_partitions)  # (data, model)
+        mesh = create_device_mesh(mesh_shape=mesh_shape)
+    else:
+        mesh = create_device_mesh()
     
     # Load the tokenizer
     logger.info(f"Loading tokenizer from {args.model_path}")
