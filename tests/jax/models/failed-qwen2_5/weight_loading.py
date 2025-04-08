@@ -534,4 +534,62 @@ def load_safetensors_into_params(model_params, weight_map, safetensors_dir):
 
 def load_qwen_weights_v2(*args, **kwargs):
     """Alias for load_qwen_weights for compatibility."""
-    return load_qwen_weights(*args, **kwargs) 
+    return load_qwen_weights(*args, **kwargs)
+
+def print_safetensors_param_names(model_path: str) -> None:
+    """Print all parameter names in the safetensors files."""
+    import logging
+    logging_level = logging.INFO
+    logger = logging.getLogger("PARAM_CHECK")
+    logger.setLevel(logging_level)
+    
+    try:
+        index_path = os.path.join(model_path, 'model.safetensors.index.json')
+        if not os.path.exists(index_path):
+            logger.error(f"Safetensors index file not found at {index_path}")
+            return
+        
+        with open(index_path, 'r') as f:
+            index = json.load(f)
+        
+        weight_map = index.get("weight_map", {})
+        logger.info(f"Found {len(weight_map)} parameters in safetensors files")
+        
+        embed_params = []
+        for i, (name, file_name) in enumerate(weight_map.items()):
+            logger.info(f"{i+1}. {name} -> {file_name}")
+            if "embed" in name:
+                logger.warning(f"EMBEDDING PARAMETER: {name}")
+                embed_params.append(name)
+        
+        # Open the first file to explore parameter values
+        first_file = None
+        for file_name in set(weight_map.values()):
+            first_file = file_name
+            break
+        
+        if first_file:
+            full_path = os.path.join(model_path, first_file)
+            logger.info(f"Opening first safetensors file: {full_path}")
+            
+            from safetensors import safe_open
+            with safe_open(full_path, framework="numpy") as f:
+                # Get first few tensors
+                tensors = list(f.keys())
+                logger.info(f"Tensor names in {first_file}: {tensors[:10]}...")
+        
+        # Check Flax name conversions for embedding parameters
+        logger.info("Checking Flax name conversion for parameters containing 'embed'")
+        logger.info(f"Found {len(embed_params)} parameters containing 'embed'")
+        for param in embed_params:
+            flax_name = convert_weight_name_to_flax(param)
+            logger.info(f"PyTorch: {param} -> Flax: {flax_name}")
+            
+            # Check actual structure of the parameter path
+            flax_path_parts = flax_name.split('/')
+            prefix = ""
+            for i, part in enumerate(flax_path_parts):
+                prefix = prefix + "/" + part if prefix else part
+                logger.info(f"  - Path component {i+1}: {prefix}")
+    except Exception as e:
+        logger.error(f"Error checking parameters: {e}") 

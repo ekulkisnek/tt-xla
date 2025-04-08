@@ -1,6 +1,383 @@
 # Qwen2.5-7B Agent Chat History
 
+## 2025-04-05: Fixing State Dictionary String Keys Issue in JAX Qwen2.5 Implementation
+
+### Current Issue We Were Working On
+We've been working on fixing the "A state dict must only have string keys" error when running the GSM8K test with the Qwen2.5-7B model in JAX. The error occurs during the model's forward pass when the parameters dictionary contains non-string keys, particularly in the transformer layers.
+
+### Technical Details of the Problem
+1. The error manifested in the `to_state_dict` function in `flax/serialization.py` with an assertion error:
+   ```
+   A state dict must only have string keys.
+   ```
+
+2. The root cause was identified in how the `fix_parameter_shapes` function was handling the layer indices. Although it had a function to ensure string keys, there was an issue in how the parameters were being accessed in the model implementation:
+   - We needed to ensure that all keys in the parameter dictionary (especially layer indices) were strings
+   - The model implementation was expecting parameters in a specific nested structure with string keys
+   - The parameters needed to be wrapped in an outer dictionary with a "params" key for model.apply
+
+3. We identified issues in the following areas:
+   - The `fix_parameter_shapes` function wasn't properly ensuring all nested keys were strings
+   - The `model_forward` function wasn't correctly structuring the parameters for the model's `apply` method
+   - The `evaluate_gsm8k` function needed updating to handle the generated logits properly
+
+### Changes Made
+1. Updated the `fix_parameter_shapes` function to recursively ensure all keys in the parameter dictionary are strings:
+   ```python
+   def ensure_string_keys(d):
+       """Recursively ensure all keys in a dictionary are strings."""
+       if not isinstance(d, dict):
+           return d
+       
+       result = {}
+       for k, v in d.items():
+           # Convert key to string if it's not already
+           str_key = str(k)
+           # Recursively process dictionary values
+           result[str_key] = ensure_string_keys(v) if isinstance(v, dict) else v
+       return result
+   
+   # Apply string key conversion to parameters
+   params = ensure_string_keys(params)
+   ```
+
+2. Modified the `model_forward` function to correctly structure parameters:
+   ```python
+   def model_forward(model, input_ids, params, config, logger):
+       """Run the model forward pass."""
+       logger.info(f"Starting model forward pass with input shape {input_ids.shape}")
+       
+       # Copy input_ids to device
+       input_ids = jax.device_put(input_ids)
+       
+       # Create position IDs
+       batch_size, seq_length = input_ids.shape
+       position_ids = jnp.arange(seq_length)[None, :].repeat(batch_size, axis=0)
+       
+       # Ensure all keys in params are strings, especially layer indices
+       params = ensure_string_keys(params)
+       
+       try:
+           # The model expects params to be wrapped in a dict with a "params" key
+           outputs = model.apply(
+               {"params": params},  # Keep the outer wrapper with "params" key
+               input_ids,
+               position_ids=position_ids,
+               use_cache=True,
+           )
+           
+           # Extract logits
+           if isinstance(outputs, tuple):
+               logits = outputs[0]
+           else:
+               logits = outputs
+               
+           logger.info(f"Forward pass successful, logits shape: {logits.shape}")
+           return logits
+       except Exception as e:
+           logger.error(f"Error in model_forward: {str(e)}")
+           logger.error(traceback.format_exc())
+           raise
+   ```
+
+3. Updated `evaluate_gsm8k` function to implement proper token generation:
+   ```python
+   # Get next token prediction
+   next_token_logits = logits[:, -1, :]
+   next_token = jnp.argmax(next_token_logits, axis=-1)
+   next_token = next_token[:, None]
+   
+   # Start with the first generated token
+   generated_ids = jnp.concatenate([input_ids, next_token], axis=1)
+   
+   # Generate tokens
+   for _ in range(args.max_tokens_to_generate - 1):
+       # Forward pass with updated sequence
+       current_logits = model_forward(
+           model=model,
+           input_ids=generated_ids,
+           params=params,
+           config=config,
+           logger=logger
+       )
+       
+       # Get next token prediction
+       next_token_logits = current_logits[:, -1, :]
+       next_token = jnp.argmax(next_token_logits, axis=-1)
+       next_token = next_token[:, None]
+       
+       # Add to generated sequence
+       generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
+       
+       # Basic stopping: if the last token is EOS, break
+       if next_token[0, 0] == tokenizer.eos_token_id:
+           break
+   ```
+
+4. Added an `extract_answer` function to properly extract numerical answers from generated text:
+   ```python
+   def extract_answer(text):
+       """Extract numerical answer from text."""
+       # Try to find the format "The answer is X" first
+       match = re.search(r'[Tt]he answer is (\d+\.?\d*)', text)
+       if match:
+           return match.group(1)
+       
+       # If that fails, look for the last number in the text
+       numbers = re.findall(r'\d+\.?\d*', text)
+       if numbers:
+           return numbers[-1]
+       
+       return None
+   ```
+
+### Current Status and Next Steps
+1. We've identified and fixed issues in the parameter handling:
+   - Adding string key conversion for parameters
+   - Correctly structuring parameters for the model.apply method
+   - Implementing proper token generation logic
+   - Fixed indentation errors in the code
+
+2. Next steps:
+   - Test the GSM8K evaluation with the fixed code
+   - Verify that the state dictionary key errors are resolved
+   - Continue optimizing the model for better performance on GSM8K tasks
+
+### Key Learnings
+1. Parameter dictionaries in Flax/JAX models must have string keys at all levels
+2. When calling model.apply, parameters need to be wrapped in a dictionary with a "params" key
+3. The Qwen2.5-7B model implementation in JAX expects a specific nested parameter structure
+4. Token generation in JAX requires careful handling of array shapes and types
+
+## 2025-04-05: Addressing MLP Parameter Reshaping Issues in JAX Qwen2.5 Implementation
+
+### Current Issue We Were Working On
+We've been fixing MLP parameter reshaping issues in the Qwen2.5-7B JAX implementation. Specifically, the model was encountering shape mismatches with the `gate_proj`, `up_proj`, and `down_proj` layers in the MLP blocks when loading weights from the safetensors files. This resulted in errors during model initialization and inference.
+
+### Technical Details of the Problem
+1. The error manifested as a shape mismatch for the "kernel" parameter in the `gate_proj` layer when trying to run the GSM8K evaluation script:
+   ```
+   Shape mismatch for model/layers_0/mlp/gate_proj/kernel. Expected (hidden_size, intermediate_size), got (intermediate_size, hidden_size).
+   ```
+
+2. The root cause was an inconsistency between:
+   - How the `QwenMLP` class in `model_implementation.py` defined its Dense layers (expecting kernels in shape (input_dim, output_dim))
+   - How the reshaping logic in `gsm8k_test.py` was handling the weights from safetensors (using shape (output_dim, input_dim))
+   - The actual shapes of the parameters in the safetensors weights files
+
+3. We verified the shapes of parameters in the safetensors files and found that:
+   - For `gate_proj` and `up_proj`, the loaded weights had shape (intermediate_size, hidden_size)
+   - For `down_proj`, the loaded weights had shape (hidden_size, intermediate_size)
+   - The JAX implementation expected the transpose of these shapes
+
+### Changes Made
+1. First, we modified the `QwenMLP` class in `model_implementation.py` to adapt to the weight shapes through a flag:
+   ```python
+   def __call__(self, x, adapt_to_weights=False):
+       if adapt_to_weights:
+           # Code to handle differently shaped weights
+           ...
+   ```
+
+2. This wasn't optimal, so we simplified the `QwenMLP` implementation to directly use `nn.Dense` layers with the correct shape expectations:
+   ```python
+   gate_proj = nn.Dense(
+       features=self.config["intermediate_size"],
+       dtype=self.dtype,
+       param_dtype=self.param_dtype,
+       use_bias=False,
+       kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+       name="gate_proj",
+   )
+   ```
+
+3. We then fixed the reshaping logic in the `get_parameter_mapping` function within `gsm8k_test.py` to ensure consistent handling:
+   ```python
+   # For gate_proj and up_proj kernels
+   if param_split[-2] in ["gate_proj", "up_proj"]:
+       if len(weights.shape) == 2:
+           # Check if the shape needs to be transposed
+           if weights.shape[0] == hidden_size and weights.shape[1] == intermediate_size:
+               logger.debug(f"Shape for {param_name} is already correct: {weights.shape}")
+           else:
+               logger.debug(f"Reshaping {param_name} from {weights.shape} to ({hidden_size}, {intermediate_size})")
+               if weights.shape[0] == intermediate_size and weights.shape[1] == hidden_size:
+                   weights = weights.T
+               else:
+                   logger.warning(f"Unexpected shape for {param_name}: {weights.shape}")
+   
+   # For down_proj kernel
+   elif param_split[-2] == "down_proj":
+       if len(weights.shape) == 2:
+           # Check if the shape needs to be transposed
+           if weights.shape[0] == intermediate_size and weights.shape[1] == hidden_size:
+               logger.debug(f"Shape for {param_name} is already correct: {weights.shape}")
+           else:
+               logger.debug(f"Reshaping {param_name} from {weights.shape} to ({intermediate_size}, {hidden_size})")
+               if weights.shape[0] == hidden_size and weights.shape[1] == intermediate_size:
+                   weights = weights.T
+               else:
+                   logger.warning(f"Unexpected shape for {param_name}: {weights.shape}")
+   ```
+
+### Testing and Verification
+- We attempted to run the GSM8K test with the updated code, but encountered interruptions during execution.
+- Our debugging showed that the parameter reshaping logic was functionally correct but needed more robust error handling.
+- We confirmed that the weight loading process properly parsed the safetensors files and identified the parameters correctly.
+
+### Next Steps
+1. Continue testing with the GSM8K evaluation script to verify the fixes work.
+2. Implement additional logging to help diagnose any remaining issues.
+3. Consider further simplifications to the parameter loading process to avoid the need for reshaping altogether.
+4. Once the weight loading and MLP reshaping issues are resolved, focus on improving the inference performance.
+
+### Key Learnings
+1. JAX/Flax and PyTorch have different conventions for the shapes of linear layer weights:
+   - JAX/Flax: (input_dim, output_dim)
+   - PyTorch: (output_dim, input_dim)
+2. The Qwen2.5-7B model's MLP architecture uses a SwiGLU activation function that requires correctly shaped gate and up projections.
+3. Parameter loading and reshaping logic needs to be consistent across both the model definition and the weight loading code.
+
+# Previous Entries
+
+# Qwen2.5-7B Agent Chat History
+
 This document captures key conclusions and learnings from agent chat sessions related to the Qwen2.5-7B tensor-parallel JAX implementation. As conversations reach their limits, summaries are prepended here to maintain a continuous history of development progress.
+
+## 2025-04-04 JAX Qwen 2.5 Implementation Progress
+
+### Overview
+We've been working on implementing the Qwen 2.5 model in JAX, particularly focusing on getting GSM8K tests to run properly. The primary challenges have been related to ensuring the correct tensor shapes across different parts of the model architecture.
+
+## 2025-04-04: Fixing Layer Normalization Parameter Loading in Qwen2.5-7B JAX Implementation
+
+### Current Issue
+We're encountering an error when running the GSM8K test with the Qwen2.5-7B model in JAX:
+
+```
+Failed with alternative format as well: Could not find parameter named "weight" in scope "/model/layers_0/input_layernorm".
+```
+
+This indicates that the RMSNorm (Layer Normalization) parameters aren't being properly loaded or mapped in the model.
+
+### Root Cause Analysis
+1. **Parameter Naming in Safetensors**: In the safetensors files, layernorm parameters are named like `model.layers.0.input_layernorm.weight`.
+
+2. **Mapping to Flax Format**: These are correctly mapped in `weight_loading.py` to `model/layers_0/input_layernorm/weight`, but there seems to be an issue with how these parameters are accessed in the model.
+
+3. **RMSNorm Implementation**: The `RMSNorm` class in `model_implementation.py` defines a parameter named "weight" via:
+   ```python
+   weight = self.param(
+       'weight',
+       nn.initializers.ones,
+       (self.dim,),
+       self.param_dtype,
+   )
+   ```
+
+4. **Parameter Structure**: The `fix_parameter_shapes` function attempted to search for parameters with various naming conventions but may not be correctly detecting or converting the layernorm parameters.
+
+### Fix Approach
+We need to modify the `fix_parameter_shapes` function in `gsm8k_test.py` to:
+1. More robustly search for layer normalization parameters in the model weights
+2. Ensure they are available at the correct paths that the `RMSNorm` class expects
+3. Handle both `input_layernorm` and `post_attention_layernorm` parameters consistently
+4. Log useful debug information about detected parameters and their paths
+
+The issue is a mismatch between how parameters are named in the weights vs. how the Flax model attempts to access them in the parameter dictionary structure.
+
+### Latest Progress and What We Were Doing
+- We verified that the layer normalization parameters exist in the safetensors files by running a check
+- We examined the `RMSNorm` class implementation to confirm how it accesses parameters
+- We looked at the parameter mapping logic in `weight_loading.py` and found it was correctly defining mappings
+- We were in the process of fixing the `fix_parameter_shapes` function in `gsm8k_test.py` to properly handle layer normalization parameters
+- After our fix to the function, we ran the test again but still encountered the same error
+- We were investigating whether there might be additional issues with how the parameters are structured or accessed
+
+The immediate next step is to investigate deeper into the parameter structure to ensure that the layernorm parameters are not only present but accessible in the exact format the model expects.
+
+
+
+### Key Problems Addressed:
+1. **Attention mechanism parameter shapes**: We discovered that the attention mechanism in the Qwen 2.5 model has different shapes for query, key, and value projections than what our initial implementation expected.
+   - The query (q_proj) needs to use the full hidden_size
+   - The key/value (k_proj, v_proj) layers need to be shaped for the multi-head attention with grouped query attention
+
+2. **Missing bias parameters**: The pretrained model doesn't include bias parameters in its linear layers, but our implementation was expecting them.
+
+3. **Matrix transpositions**: Several weight matrices needed to be transposed to work correctly in JAX, particularly in the attention and MLP layers.
+
+### Current Implementation Status
+- Model architecture is implemented
+- Weight loading from safetensors is working
+- Parameter shape fixing function implemented to handle transpositions
+
+### Most Recent Issues
+
+We're currently trying to solve issues with shape mismatches between the model's implementation and the loaded weights. Specifically:
+
+1. We modified the model to make all linear layers configurable to not use biases via `use_attention_bias` and `use_mlp_bias` config parameters
+2. We fixed the shape handling in the `QwenAttention` class to properly set the dimensions of the key and value projections
+3. We improved the parameter shape fixing function to correctly handle transpositions
+4. We added support for flattening and unflattening parameter dictionaries
+
+When we stopped, we were testing these changes to get the GSM8K inference to run correctly.
+
+### Key Code Changes
+
+1. Modified the QwenAttention class to set the correct feature dimensions for KV heads:
+```python
+# For k_proj and v_proj, we need to handle the case where weights are shaped differently
+# For Qwen models, the KV heads are different from attention heads
+kv_dim = self.config["num_key_value_heads"] * head_dim
+
+k_proj = nn.Dense(
+    features=kv_dim,
+    dtype=self.dtype,
+    param_dtype=self.param_dtype,
+    use_bias=self.config.get("use_attention_bias", False),
+    kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+    name="k_proj",
+)
+```
+
+2. Added shape fixing with configuration-based dimensions:
+```python
+def fix_parameter_shapes(params, model_config):
+    """Fix parameter shapes to match the expected shapes in the model."""
+    logging.info("Fixing parameter shapes...")
+    
+    # Extract dimensions from model config
+    hidden_size = model_config["hidden_size"]
+    num_attention_heads = model_config["num_attention_heads"]
+    num_key_value_heads = model_config["num_key_value_heads"]
+    head_dim = hidden_size // num_attention_heads
+    
+    # Calculate expected dimensions for keys and values
+    kv_dim = num_key_value_heads * head_dim
+    
+    # Define patterns for layers that need shape fixing
+    down_proj_pattern = re.compile(r'model/layers_(\d+)/mlp/down_proj/kernel')
+    mlp_pattern = re.compile(r'model/layers_(\d+)/mlp/(gate_proj|up_proj)/kernel')
+    kv_pattern = re.compile(r'model/layers_(\d+)/self_attn/(k_proj|v_proj)/kernel')
+    
+    # Process each parameter and fix shapes as needed
+    # ...
+```
+
+3. Added config flags for the model to adapt to the weights:
+```python
+# Configure the model to match the weights
+config["use_attention_bias"] = False
+config["use_mlp_bias"] = False
+config["qwen_attention_heads_match_actual_weights"] = True
+```
+
+## Next Steps
+1. Get the GSM8K test running with a single example
+2. Address any remaining shape issues
+3. Test with multiple examples and verify GSM8K task accuracy
+4. Consider optimizations for improved performance 
 
 ## 2025-04-04: Fixed Qwen2.5 Model Application Issues in GSM8K Evaluation
 
@@ -385,4 +762,5 @@ All components now work together seamlessly, providing a complete JAX implementa
 
 - Confirmed that both standard and tensor-parallel model versions can be initialized and run
 
-All components now work together seamlessly, providing a complete JAX implementation of the Qwen2.5-7B model with tensor parallelism that follows HuggingFace conventions and provides robust evaluation capabilities. 
+All components now work together seamlessly, providing a complete JAX implementation of the Qwen2.5-7B model with tensor parallelism that follows HuggingFace conventions and provides robust evaluation capabilities.
+

@@ -13,35 +13,50 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, Mesh
 import numpy as np
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def load_qwen_config(model_path: str) -> Dict[str, Any]:
-    """
-    Load the Qwen2.5 model configuration from the given path.
-    
-    Args:
-        model_path: Path to the model directory containing config.json
-        
-    Returns:
-        Dictionary containing the model configuration
-    """
-    config_path = os.path.join(model_path, 'config.json')
+def load_qwen_config(
+    weights_path: str, mesh: Optional[Mesh] = None
+) -> Dict[str, Any]:
+    """Load Qwen2 configuration from JSON file and add mesh and config dict."""
+    # Load configuration from JSON
+    config_path = os.path.join(weights_path, "config.json")
     if not os.path.exists(config_path):
-        logger.error(f"Config file not found at {config_path}")
-        raise FileNotFoundError(f"Config file not found at {config_path}")
+        raise ValueError(f"Configuration file not found at {config_path}")
     
-    logger.info(f"Loading config from {config_path}")
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config = json.load(f)
     
-    # Add model_type if not present
-    if "model_type" not in config:
-        config["model_type"] = "qwen2_5"
-        logger.info("Added default model_type='qwen2_5' to config")
+    # Extract key dimensions needed for JAX model
+    config = {
+        "hidden_size": config.get("hidden_size", 3584),
+        "intermediate_size": config.get("intermediate_size", 14336),
+        "num_hidden_layers": config.get("num_hidden_layers", 28),
+        "num_attention_heads": config.get("num_attention_heads", 28),
+        "num_key_value_heads": config.get("num_key_value_heads", 4),
+        "vocab_size": config.get("vocab_size", 152064),
+        "attention_bias": False,
+        "tie_word_embeddings": False,
+        "rope_theta": config.get("rope_theta", 10000.0),
+        "initializer_range": config.get("initializer_range", 0.02),
+        "rms_norm_eps": config.get("rms_norm_eps", 1e-6),
+    }
+    
+    # Set mesh if provided
+    if mesh is not None:
+        config["mesh"] = mesh
+    
+    # Calculate derived values needed for the model
+    # This is critical for proper parameter loading
+    head_dim = config["hidden_size"] // config["num_attention_heads"]
+    
+    # Ensure these dimensions match the loaded parameters
+    config["head_dim"] = head_dim
+    config["qwen_attention_heads_match_actual_weights"] = True
     
     return config
 
