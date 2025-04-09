@@ -16,10 +16,10 @@ from typing import Any, Dict, Optional, Tuple
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental import mesh_utils
 
-from model_implementation import (
+from .model_implementation import (
     RMSNorm,
     QwenAttention,
-    Qwen2_5MLP as QwenMLP,
+    Qwen2_5MLP,
     QwenTransformerBlock,
     Qwen2_5Model,
     Qwen2_5ForCausalLM,
@@ -53,33 +53,24 @@ def create_device_mesh(mesh_shape):
         devices = devices[:required_devices]
     
     try:
-        # Create a flat array of devices with the required shape
-        devices_array = np.array(devices).reshape(mesh_shape)
-        mesh = Mesh(devices_array, ('batch', 'model'))
-        print(f"Mesh created with shape {mesh_shape}")
+        # Create device mesh using mesh_utils
+        device_mesh = mesh_utils.create_device_mesh(
+            mesh_shape,
+            devices=devices,
+            contiguous_submeshes=True
+        )
+        mesh = Mesh(device_mesh, ('batch', 'model'))
+        print(f"Mesh created successfully")
         print(f"Mesh axis_names: {mesh.axis_names}")
-        print(f"Mesh object properties: shape={getattr(mesh, 'shape', 'None')}, "
-              f"size={getattr(mesh, 'size', 'None')}")
         print(f"Mesh device shape: {mesh.devices.shape}")
         return mesh
-    except ValueError as e:
-        print(f"Error creating mesh with np.array.reshape: {e}")
-        try:
-            # Try using mesh_utils with the sliced devices
-            device_mesh = mesh_utils.create_device_mesh(mesh_shape, devices=devices[:required_devices])
-            mesh = Mesh(device_mesh, ('batch', 'model'))
-            print(f"Mesh created using mesh_utils")
-            print(f"Mesh axis_names: {mesh.axis_names}")
-            print(f"Mesh object properties: shape={getattr(mesh, 'shape', 'None')}, "
-                  f"size={getattr(mesh, 'size', 'None')}")
-            print(f"Mesh device shape: {mesh.devices.shape}")
-            return mesh
-        except Exception as ex:
-            print(f"Error creating mesh with mesh_utils: {ex}")
-            raise ValueError(
-                f"Failed to create device mesh with shape {mesh_shape}. "
-                f"Available devices: {len(devices)}. Required: {required_devices}."
-            )
+    except Exception as e:
+        print(f"Error creating mesh: {e}")
+        raise ValueError(
+            f"Failed to create device mesh with shape {mesh_shape}. "
+            f"Available devices: {len(devices)}. Required: {required_devices}. "
+            f"Error: {str(e)}"
+        )
 
 def get_partition_specs(config):
     """
@@ -339,7 +330,7 @@ class TensorParallelQwenAttention(nn.Module):
         )
         
         # Apply rotary embeddings from model_implementation
-        from model_implementation import apply_rotary_emb
+        from .model_implementation import apply_rotary_emb
         query_states, key_states = apply_rotary_emb(
             query_states, key_states, rotary_emb, position_ids
         )

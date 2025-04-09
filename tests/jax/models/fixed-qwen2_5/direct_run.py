@@ -12,15 +12,12 @@ import sys
 import argparse
 import logging
 
-# Add the parent directory to the Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 # Import the model implementation
-from tests.jax.models.failed_qwen2_5 import (
+from . import (
     AutoQwenModel,
     AutoQwenModelTensorParallel,
     get_model,

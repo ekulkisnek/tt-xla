@@ -26,13 +26,14 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
+from jax.sharding import Mesh
 
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 
 from .configuration_qwen2_5 import Qwen25Config
-from .tensor_parallel import FlaxQwen25WithSharding
+from .sharding import FlaxQwen25WithSharding
 
 
 logger = logging.get_logger(__name__)
@@ -175,32 +176,41 @@ class FlaxQwen25RotaryEmbedding(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        head_dim = self.config.hidden_size // self.config.num_attention_heads
-        self.max_seq_len = self.config.max_position_embeddings
-        # Create sinusoidal embeddings
-        self.cos_sin = jnp.array(create_sinusoidal_positions(self.max_seq_len, head_dim), dtype=self.dtype)
+        self.max_seq_len_cached = self.config.max_position_embeddings
+        self.head_dim = self.config.hidden_size // self.config.num_attention_heads
+        self.inv_freq = 1.0 / (self.config.rope_theta ** (jnp.arange(0, self.head_dim, 2) / self.head_dim))
+        self.cos_sin = self.create_sinusoidal_positions(self.max_seq_len_cached, self.inv_freq)
+
+    def create_sinusoidal_positions(self, position_ids):
+        # Create inverse frequency bands
+        inv_freq = 1.0 / (self.config.rope_theta ** (jnp.arange(0, self.head_dim, 2).astype("float32") / self.head_dim))
+        
+        # Create sinusoidal positions
+        sinusoid_inp = jnp.einsum("i,j->ij", position_ids.astype("float32"), inv_freq)
+        sin = jnp.sin(sinusoid_inp)
+        cos = jnp.cos(sinusoid_inp)
+        
+        return sin, cos
 
     def __call__(self, q, k, position_ids):
-        # position_ids: [batch_size, seq_len]
-        # q, k: [batch_size, seq_len, num_heads, head_dim]
-        batch_size, seq_len = position_ids.shape
-        head_dim = q.shape[-1]
+        sin, cos = self.create_sinusoidal_positions(position_ids)
+        q_rot = self.apply_rotary_pos_emb(q, sin, cos)
+        k_rot = self.apply_rotary_pos_emb(k, sin, cos)
+        return q_rot, k_rot
+
+    def apply_rotary_pos_emb(self, x, sin, cos):
+        # Split the last dimension into two halves
+        x1, x2 = jnp.split(x, 2, axis=-1)
         
-        # Get the embeddings corresponding to the positions
-        # cos_sin: [2, max_seq_len, head_dim]
-        # Indices based on position_ids to select the right embeddings
-        indices = position_ids.reshape(-1)  # Flatten to 1D array of indices
-        cos = jnp.take(self.cos_sin[1], indices, axis=0)  # [batch_size*seq_len, head_dim]
-        sin = jnp.take(self.cos_sin[0], indices, axis=0)  # [batch_size*seq_len, head_dim]
-        
-        # Reshape back to match input dimensions
-        cos = cos.reshape(batch_size, seq_len, head_dim)  # [batch_size, seq_len, head_dim]
-        sin = sin.reshape(batch_size, seq_len, head_dim)  # [batch_size, seq_len, head_dim]
+        # Reshape sin and cos to match x1 and x2 dimensions
+        sin = sin.reshape(x1.shape)
+        cos = cos.reshape(x1.shape)
         
         # Apply rotary embeddings
-        q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin)
-        
-        return k_embed, q_embed
+        return jnp.concatenate(
+            [x1 * cos - x2 * sin, x2 * cos + x1 * sin],
+            axis=-1
+        )
 
 
 class FlaxQwen25Attention(nn.Module):
@@ -529,7 +539,7 @@ class FlaxQwen25Module(nn.Module):
         )
 
 
-class FlaxQwen25PreTrainedModel(FlaxPreTrainedModel, FlaxQwen25WithSharding):
+class FlaxQwen25PreTrainedModel(FlaxPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.

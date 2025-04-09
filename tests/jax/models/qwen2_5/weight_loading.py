@@ -82,17 +82,7 @@ def convert_qwen25_checkpoint(
 ) -> Union[FlaxQwen25Model, FlaxQwen25ForCausalLM]:
     """
     Load a Qwen2.5 checkpoint from HuggingFace format into a Flax model with tensor parallelism.
-    
-    Args:
-        checkpoint_dir: Path to the checkpoint directory
-        config: Model configuration
-        dtype: Data type for model parameters
-        with_lm_head: Whether to load the LM head (for FlaxQwen25ForCausalLM) or not (for FlaxQwen25Model)
-        mesh: JAX device mesh for tensor parallelism
-        partition_rules: Rules for tensor partitioning
-        
-    Returns:
-        The loaded Flax model
+    Uses memory-efficient loading by processing weights in chunks.
     """
     if config is None:
         from transformers import AutoConfig
@@ -102,15 +92,7 @@ def convert_qwen25_checkpoint(
             config_dict = config.to_dict()
             config = Qwen25Config(**config_dict)
     
-    # Create device mesh for tensor parallelism
-    if mesh is None:
-        mesh = create_device_mesh()
-    
-    # Use default partitioning rules if not provided
-    if partition_rules is None and hasattr(config, "base_model_tp_plan"):
-        partition_rules = config.base_model_tp_plan
-    
-    # Initialize the model with proper tensor parallelism
+    # Initialize model with proper tensor parallelism
     logger.info(f"Initializing {'FlaxQwen25ForCausalLM' if with_lm_head else 'FlaxQwen25Model'} with tensor parallelism")
     model_class = FlaxQwen25ForCausalLM if with_lm_head else FlaxQwen25Model
     
@@ -125,12 +107,36 @@ def convert_qwen25_checkpoint(
     # Get checkpoint files
     checkpoint_files = get_checkpoint_files(checkpoint_dir)
     
-    # Load state dict from files
+    # Load state dict from files in chunks
     logger.info(f"Converting weights from PyTorch to Flax")
     is_sharded = len(checkpoint_files) > 1
-    flax_state_dict = load_pytorch_checkpoint_in_flax_state_dict(
-        model, checkpoint_files, is_sharded=is_sharded
-    )
+    
+    # Process each file separately to save memory
+    for checkpoint_file in checkpoint_files:
+        logger.info(f"Processing {checkpoint_file}")
+        if checkpoint_file.endswith('.safetensors'):
+            state_dict = safe_load_file(checkpoint_file)
+        else:
+            import torch
+            state_dict = torch.load(checkpoint_file, map_location='cpu', weights_only=True)
+        
+        # Convert weights to Flax format
+        flax_state_dict = {}
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                value = value.numpy()
+            if value.dtype != dtype:
+                value = value.astype(dtype)
+            flax_state_dict[key] = value
+        
+        # Update model parameters
+        model.params.update(flax_state_dict)
+        
+        # Clear memory
+        del state_dict
+        del flax_state_dict
+        import gc
+        gc.collect()
     
     # Create partition specs for state dict
     param_specs = get_partition_specs(model.params, partition_rules)
@@ -145,6 +151,6 @@ def convert_qwen25_checkpoint(
                 is_leaf=lambda x: x is None
             )
         
-        model.params = apply_sharding(flax_state_dict, param_specs)
+        model.params = apply_sharding(model.params, param_specs)
     
     return model 

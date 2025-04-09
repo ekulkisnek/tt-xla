@@ -1,0 +1,32 @@
+{
+    "add_bos_token": true,
+    "add_eos_token": true,
+    "bos_token": {
+        "__type": "AddedToken",
+        "content": "<|endoftext|>",
+        "lstrip": false,
+        "normalized": true,
+        "rstrip": false,
+        "single_word": false
+    },
+    "clean_up_tokenization_spaces": true,
+    "eos_token": {
+        "__type": "AddedToken",
+        "content": "<|endoftext|>",
+        "lstrip": false,
+        "normalized": true,
+        "rstrip": false,
+        "single_word": false
+    },
+    "model_max_length": 32768,
+    "pad_token": null,
+    "tokenizer_class": "PreTrainedTokenizerFast",
+    "unk_token": {
+        "__type": "AddedToken",
+        "content": "<|endoftext|>",
+        "lstrip": false,
+        "normalized": true,
+        "rstrip": false,
+        "single_word": false
+    }
+} 

@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Simplified script to directly run the Qwen2.5-7B model using the auto model system.
+Simple test script to run the Qwen2.5-7B model.
 """
 
 import os
@@ -19,19 +19,11 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
-# Import the model implementation
-from tests.jax.models.failed_qwen2_5 import (
-    AutoQwenModel,
-    AutoQwenModelTensorParallel,
-    get_model,
-    load_qwen_config,
-    get_qwen2_7b_config,
-    get_small_config,
-    create_device_mesh
-)
-
-# Set up logging
-logger = logging.getLogger(__name__)
+# Import the model implementation directly
+from model_implementation import Qwen2_5ForCausalLM
+from tensor_parallel import TensorParallelQwen2ForCausalLM, create_device_mesh
+from config import get_qwen2_7b_config
+from weight_loading import load_qwen_weights, init_model_from_weights
 
 def main():
     parser = argparse.ArgumentParser(description='Run Qwen2.5 model directly')
@@ -41,12 +33,6 @@ def main():
                         help='Whether to use tensor parallelism')
     parser.add_argument('--mesh_shape', type=str, default='1x8',
                         help='Shape of the device mesh for tensor parallelism (batch, model)')
-    parser.add_argument('--use_small_config', action='store_true',
-                        help='Whether to use a small model config for testing')
-    parser.add_argument('--max_tokens', type=int, default=20,
-                        help='Maximum number of new tokens to generate')
-    parser.add_argument('--run_gsm8k', action='store_true',
-                        help='Run GSM8K benchmark instead of interactive mode')
     
     args = parser.parse_args()
     
@@ -65,18 +51,8 @@ def main():
         print(f"Set XLA_FLAGS to simulate {required_devices} devices")
     
     # Load model configuration
-    if args.use_small_config:
-        config = get_small_config(hidden_size=128, num_layers=2)
-        print("Using small model configuration for testing")
-    elif args.model_path and os.path.exists(os.path.join(args.model_path, "config.json")):
-        config = load_qwen_config(args.model_path)
-        print(f"Loaded configuration from {args.model_path}")
-    else:
-        config = get_qwen2_7b_config()
-        print("Using default Qwen2.5-7B configuration")
-    
-    # Set model_type in config for auto classes
-    config["model_type"] = "qwen2_5"
+    config = get_qwen2_7b_config()
+    print("Using default Qwen2.5-7B configuration")
     
     # Print model details
     print("\nModel Configuration:")
@@ -98,18 +74,14 @@ def main():
         print(f"- Mesh shape: {mesh_shape[0]}x{mesh_shape[1]}")
         print(f"- Total devices: {mesh_shape[0] * mesh_shape[1]}")
         
-        # Initialize with the auto model system
-        model = get_model(
-            model_type="qwen2_5",
-            use_tensor_parallel=True,
-            mesh_shape=mesh_shape,
+        # Initialize with tensor parallelism
+        mesh = create_device_mesh(mesh_shape)
+        model = TensorParallelQwen2ForCausalLM(
             config=config,
             dtype=dtype,
-            param_dtype=param_dtype
+            param_dtype=param_dtype,
+            mesh=mesh
         )
-        
-        # Create mesh for operations
-        mesh = create_device_mesh(mesh_shape)
         
         # Generate input for testing
         batch_size = max(1, mesh_shape[0])  # Match batch dimension to mesh
@@ -132,10 +104,8 @@ def main():
             outputs = model.apply(params, sharded_input)
         
     else:
-        # Create standard model using auto model system
-        model = get_model(
-            model_type="qwen2_5",
-            use_tensor_parallel=False,
+        # Create standard model
+        model = Qwen2_5ForCausalLM(
             config=config,
             dtype=dtype,
             param_dtype=param_dtype
@@ -179,20 +149,13 @@ def main():
         try:
             if args.use_tensor_parallel:
                 print(f"Loading tensor-parallel model from {args.model_path}...")
-                model_pretrained = AutoQwenModelTensorParallel.from_pretrained(
-                    args.model_path,
-                    mesh_shape=mesh_shape,
-                    dtype=dtype,
-                    param_dtype=param_dtype
-                )
+                params = load_qwen_weights(args.model_path, model)
+                model_initialized = init_model_from_weights(model, params, config, input_ids_shape=(1, 16))
                 print("✅ Successfully loaded tensor-parallel model from pretrained weights")
             else:
                 print(f"Loading standard model from {args.model_path}...")
-                model_pretrained = AutoQwenModel.from_pretrained(
-                    args.model_path,
-                    dtype=dtype,
-                    param_dtype=param_dtype
-                )
+                params = load_qwen_weights(args.model_path, model)
+                model_initialized = init_model_from_weights(model, params, config, input_ids_shape=(1, 16))
                 print("✅ Successfully loaded model from pretrained weights")
         except Exception as e:
             print(f"❌ Failed to load pretrained model: {str(e)}")

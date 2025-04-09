@@ -20,151 +20,79 @@ from typing import Dict, List, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
-from flax import nnx
+from jax.experimental import mesh_utils
+from jax.experimental.shard_map import shard_map
+from flax import linen as nn
+from flax.core import freeze, unfreeze
+from flax.traverse_util import flatten_dict, unflatten_dict
 import numpy as np
 
+from .sharding import with_sharding_constraint
 
-def create_device_mesh(mesh_shape: Tuple[int, ...] = None, axis_names: Tuple[str, ...] = None) -> Mesh:
-    """
-    Create a device mesh for tensor parallelism.
-    
-    Args:
-        mesh_shape: Shape of the device mesh. If None, will use all available devices.
-        axis_names: Names of the mesh axes. Default is ('data', 'model').
-    
-    Returns:
-        jax.sharding.Mesh: The device mesh.
-    """
-    if mesh_shape is None:
-        # Get number of devices and create a simple 1D mesh
-        num_devices = jax.device_count()
-        mesh_shape = (1, num_devices)  # (data, model)
-    
-    if axis_names is None:
-        axis_names = ('data', 'model')
-    
+
+def create_device_mesh(mesh_shape: Tuple[int, int]) -> np.ndarray:
+    """Create a device mesh for Tenstorrent hardware."""
+    # Get available Tenstorrent devices
     devices = jax.devices()
-    if len(devices) != mesh_shape[0] * mesh_shape[1]:
-        # If meshape doesn't match device count, adjust it
-        mesh_shape = (1, len(devices))
+    tt_devices = [d for d in devices if d.platform == 'tt']
     
-    # Create a list of devices and reshape it to the mesh shape
-    device_mesh = np.array(devices).reshape(mesh_shape)
-    return Mesh(device_mesh, axis_names)
+    if not tt_devices:
+        raise RuntimeError("No Tenstorrent devices found. Make sure JAX is configured to use Tenstorrent hardware.")
+    
+    num_devices = len(tt_devices)
+    requested_devices = np.prod(mesh_shape)
+    
+    if num_devices < requested_devices:
+        raise ValueError(
+            f"Not enough Tenstorrent devices. Requested {requested_devices} devices but only {num_devices} available."
+        )
+    
+    # Use the first N devices where N = requested_devices
+    devices_to_use = tt_devices[:requested_devices]
+    
+    # Reshape devices into mesh
+    device_mesh = np.array(devices_to_use).reshape(mesh_shape)
+    return device_mesh
 
 
-def with_sharding_constraint(x, partitioning):
-    """Apply sharding constraint to a tensor."""
-    return jax.lax.with_sharding_constraint(x, partitioning)
-
-
-def get_partition_specs(state_dict, partition_rules):
-    """
-    Convert a state dict to partition specs based on partition rules.
+def get_partition_specs(config):
+    """Get partition specs for model parameters."""
+    # Define base partition specs
+    base_specs = {
+        'kernel': PartitionSpec('mp', None),
+        'bias': PartitionSpec('mp'),
+        'embedding': PartitionSpec('mp', None),
+        'norm': PartitionSpec(None),
+        'lm_head': PartitionSpec('mp', None),
+    }
     
-    Args:
-        state_dict: The state dict to convert.
-        partition_rules: A dictionary of patterns to partition specs.
+    # Create partition specs for each layer
+    layer_specs = {}
+    for i in range(config.num_hidden_layers):
+        layer_specs[f'layers_{i}'] = {
+            'attention': {
+                'q_proj': base_specs,
+                'k_proj': base_specs,
+                'v_proj': base_specs,
+                'o_proj': base_specs,
+            },
+            'mlp': {
+                'gate_proj': base_specs,
+                'up_proj': base_specs,
+                'down_proj': base_specs,
+            },
+            'input_layernorm': base_specs,
+            'post_attention_layernorm': base_specs,
+        }
     
-    Returns:
-        A dictionary of partition specs.
-    """
-    import re
-    from flax.traverse_util import flatten_dict, unflatten_dict
+    # Combine all specs
+    partition_specs = {
+        'model': {
+            'embed_tokens': base_specs,
+            'norm': base_specs,
+            'layers': layer_specs,
+            'lm_head': base_specs,
+        }
+    }
     
-    flat_params = flatten_dict(state_dict)
-    flat_partitioning = {}
-    
-    for path, value in flat_params.items():
-        path_str = ".".join(path)
-        found = False
-        
-        for pattern, rule in partition_rules.items():
-            # Convert glob pattern to regex
-            regex_pattern = pattern.replace(".", r"\.").replace("*", r".*")
-            if re.match(regex_pattern, path_str):
-                if rule == "colwise":
-                    flat_partitioning[path] = PartitionSpec(None, "model")
-                elif rule == "rowwise":
-                    flat_partitioning[path] = PartitionSpec("model", None)
-                elif rule == "replicated":
-                    flat_partitioning[path] = PartitionSpec()
-                else:
-                    flat_partitioning[path] = rule
-                found = True
-                break
-        
-        if not found:
-            # Default to replicated
-            flat_partitioning[path] = PartitionSpec()
-    
-    return unflatten_dict(flat_partitioning)
-
-
-class FlaxQwen25WithSharding:
-    """
-    Mixin class to add sharding functionality to Flax Qwen2.5 models.
-    """
-    
-    @classmethod
-    def init_for_sharding(
-        cls,
-        config,
-        input_shape=(1, 1),
-        seed=0,
-        dtype=jnp.float32,
-        mesh=None,
-        partition_rules=None,
-    ):
-        """
-        Initialize the model with sharding constraints.
-        
-        Args:
-            config: Model configuration
-            input_shape: Shape of input tensor
-            seed: Random seed
-            dtype: Model dtype
-            mesh: Device mesh for tensor parallelism
-            partition_rules: Rules for tensor partitioning
-            
-        Returns:
-            Initialized model with sharded parameters
-        """
-        # Create default mesh if not provided
-        if mesh is None:
-            mesh = create_device_mesh()
-        
-        # Use default partitioning rules if not provided
-        if partition_rules is None and hasattr(config, "base_model_tp_plan"):
-            partition_rules = config.base_model_tp_plan
-        elif partition_rules is None:
-            # Default rules for transformer models
-            partition_rules = {
-                "self_attn.q_proj": "colwise",
-                "self_attn.k_proj": "colwise",
-                "self_attn.v_proj": "colwise",
-                "self_attn.o_proj": "rowwise",
-                "mlp.gate_proj": "colwise",
-                "mlp.up_proj": "colwise",
-                "mlp.down_proj": "rowwise",
-            }
-        
-        # Initialize the model with sharding constraints
-        with mesh:
-            model = cls(config, input_shape=input_shape, seed=seed, dtype=dtype)
-            
-            # Create partition specs for state dict
-            param_specs = get_partition_specs(model.params, partition_rules)
-            
-            # Apply sharding constraints
-            def apply_sharding(params, specs):
-                return jax.tree_util.tree_map(
-                    lambda p, s: with_sharding_constraint(p, s) if p is not None else None,
-                    params,
-                    specs,
-                    is_leaf=lambda x: x is None
-                )
-            
-            model.params = apply_sharding(model.params, param_specs)
-            
-        return model 
+    return partition_specs 

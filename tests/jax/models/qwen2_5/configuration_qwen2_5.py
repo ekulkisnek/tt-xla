@@ -15,11 +15,35 @@
 """Qwen2.5 model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)
+
+
+def rope_config_validation(config):
+    """Validate RoPE configuration parameters."""
+    if config.rope_scaling is None:
+        return
+    
+    valid_rope_types = ["default", "linear", "dynamic", "yarn", "longrope", "llama3"]
+    rope_scaling = config.rope_scaling
+    
+    if "rope_type" not in rope_scaling:
+        if "type" in rope_scaling:
+            rope_scaling["rope_type"] = rope_scaling["type"]
+        else:
+            rope_scaling["rope_type"] = "default"
+    
+    if rope_scaling["rope_type"] not in valid_rope_types:
+        raise ValueError(
+            f"rope_type {rope_scaling['rope_type']} is not supported. "
+            f"Please select one of {valid_rope_types}"
+        )
+    
+    if rope_scaling["rope_type"] != "default" and "factor" not in rope_scaling:
+        logger.warning("factor not found in rope_scaling. Setting to 1.0")
+        rope_scaling["factor"] = 1.0
 
 
 class Qwen25Config(PretrainedConfig):
@@ -126,7 +150,7 @@ class Qwen25Config(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "qwen2_5"
+    model_type = "qwen2"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     # Default tensor parallel plan for base model `Qwen25`
@@ -190,9 +214,6 @@ class Qwen25Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_dropout = attention_dropout
         # Validate the correctness of rotary position embeddings parameters
-        # BC: if there is a 'type' field, move it to 'rope_type'.
-        if self.rope_scaling is not None and "type" in self.rope_scaling:
-            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
 
         super().__init__(

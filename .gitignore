@@ -25,3 +25,61 @@ venv/*
 
 # Packaging scripts write artifacts here.
 bindist/
+
+# Model weights and large files
+tests/jax/models/qwen2_5/qwen2_5-7b/
+tests/jax/models/qwen2_5/qwen2_5-7b/*
+!tests/jax/models/qwen2_5/qwen2_5-7b/README.md
+!tests/jax/models/qwen2_5/qwen2_5-7b/LICENSE
+!tests/jax/models/qwen2_5/qwen2_5-7b/config.json
+!tests/jax/models/qwen2_5/qwen2_5-7b/tokenizer_config.json
+!tests/jax/models/qwen2_5/qwen2_5-7b/generation_config.json
+!tests/jax/models/qwen2_5/qwen2_5-7b/.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+mesh_eval_results/
+
+# Misc
+.DS_Store
+.env
+.env.local
+.env.*.local
+qwen2.5-7b/model-00001-of-00004.safetensors
+qwen2.5-7b/model-00002-of-00004.safetensors
+qwen2.5-7b/model-00003-of-00004.safetensors
+qwen2.5-7b/model-00004-of-00004.safetensors

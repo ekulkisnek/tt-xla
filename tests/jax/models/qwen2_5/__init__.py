@@ -15,15 +15,15 @@
 
 from .configuration_qwen2_5 import Qwen25Config
 from .modeling_flax_qwen2_5 import (
-    FlaxQwen25Model,
     FlaxQwen25ForCausalLM,
+    FlaxQwen25Model,
     FlaxQwen25PreTrainedModel,
 )
 from .tensor_parallel import (
     create_device_mesh,
     get_partition_specs,
-    FlaxQwen25WithSharding,
 )
+from .sharding import FlaxQwen25WithSharding
 from .weight_loading import convert_qwen25_checkpoint
 
 # Default partition rules for Qwen2.5 for tensor parallelism
@@ -39,12 +39,12 @@ partition_rules_qwen25 = {
 
 __all__ = [
     "Qwen25Config",
-    "FlaxQwen25Model",
     "FlaxQwen25ForCausalLM",
+    "FlaxQwen25Model",
     "FlaxQwen25PreTrainedModel",
+    "FlaxQwen25WithSharding",
     "create_device_mesh",
     "get_partition_specs",
-    "FlaxQwen25WithSharding",
     "convert_qwen25_checkpoint",
     "partition_rules_qwen25",
 ] 
