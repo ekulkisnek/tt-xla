@@ -124,31 +124,32 @@ QWEN25_INPUTS_DOCSTRING = r"""
 
 
 def create_sinusoidal_positions(num_pos, dim):
+    """Create sinusoidal position embeddings."""
     inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))
-    freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
-
-    emb = np.concatenate((freqs, freqs), axis=-1)
-    sin_emb = np.sin(emb)[..., None, :]  # Add head dimension
-    cos_emb = np.cos(emb)[..., None, :]  # Add head dimension
-    return jnp.asarray(np.concatenate((sin_emb, cos_emb), axis=-1)[..., :dim])
+    sinusoid_inp = np.einsum("i,j->ij", np.arange(num_pos), inv_freq)
+    return np.stack([np.sin(sinusoid_inp), np.cos(sinusoid_inp)], axis=0)
 
 
-def rotate_half(tensor):
+def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    rotate_half_tensor = jnp.concatenate(
-        (-tensor[..., tensor.shape[-1] // 2 :], tensor[..., : tensor.shape[-1] // 2]), axis=-1
-    )
-    return rotate_half_tensor
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return jnp.concatenate([-x2, x1], axis=-1)
 
 
-def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
-    # Match the shapes for broadcasting
-    # tensor shape is typically (batch, seq_len, num_heads, head_dim)
-    # Ensure sin_pos and cos_pos have compatible shapes
-    sin_pos = jnp.expand_dims(sin_pos, axis=2) if sin_pos.ndim < tensor.ndim else sin_pos
-    cos_pos = jnp.expand_dims(cos_pos, axis=2) if cos_pos.ndim < tensor.ndim else cos_pos
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """Apply rotary positional embeddings to queries and keys."""
+    # Reshape sin and cos for proper broadcasting
+    # cos_emb and sin_emb have shape [batch_size, seq_len, head_dim]
+    # q and k have shape [batch_size, seq_len, num_heads, head_dim]
     
-    return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
+    # Add head dimension to sin and cos
+    sin = jnp.expand_dims(sin, axis=2)  # [batch_size, seq_len, 1, head_dim]
+    cos = jnp.expand_dims(cos, axis=2)  # [batch_size, seq_len, 1, head_dim]
+    
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
 
 
 class FlaxQwen25RMSNorm(nn.Module):
@@ -175,24 +176,31 @@ class FlaxQwen25RotaryEmbedding(nn.Module):
 
     def setup(self):
         head_dim = self.config.hidden_size // self.config.num_attention_heads
-        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
+        self.max_seq_len = self.config.max_position_embeddings
+        # Create sinusoidal embeddings
+        self.cos_sin = jnp.array(create_sinusoidal_positions(self.max_seq_len, head_dim), dtype=self.dtype)
 
-    def __call__(self, key, query, position_ids):
-        sincos = self.sincos[position_ids]
-        # Split along the last dimension
-        sin_pos, cos_pos = jnp.split(sincos, 2, axis=-1)
+    def __call__(self, q, k, position_ids):
+        # position_ids: [batch_size, seq_len]
+        # q, k: [batch_size, seq_len, num_heads, head_dim]
+        batch_size, seq_len = position_ids.shape
+        head_dim = q.shape[-1]
         
-        # Reshape sin_pos and cos_pos to match key and query shape for proper broadcasting
-        sin_pos = sin_pos.reshape(sin_pos.shape[:2] + (1, sin_pos.shape[-1]))
-        cos_pos = cos_pos.reshape(cos_pos.shape[:2] + (1, cos_pos.shape[-1]))
-
-        key = apply_rotary_pos_emb(key, sin_pos, cos_pos)
-        query = apply_rotary_pos_emb(query, sin_pos, cos_pos)
-
-        key = jnp.asarray(key, dtype=self.dtype)
-        query = jnp.asarray(query, dtype=self.dtype)
-
-        return key, query
+        # Get the embeddings corresponding to the positions
+        # cos_sin: [2, max_seq_len, head_dim]
+        # Indices based on position_ids to select the right embeddings
+        indices = position_ids.reshape(-1)  # Flatten to 1D array of indices
+        cos = jnp.take(self.cos_sin[1], indices, axis=0)  # [batch_size*seq_len, head_dim]
+        sin = jnp.take(self.cos_sin[0], indices, axis=0)  # [batch_size*seq_len, head_dim]
+        
+        # Reshape back to match input dimensions
+        cos = cos.reshape(batch_size, seq_len, head_dim)  # [batch_size, seq_len, head_dim]
+        sin = sin.reshape(batch_size, seq_len, head_dim)  # [batch_size, seq_len, head_dim]
+        
+        # Apply rotary embeddings
+        q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin)
+        
+        return k_embed, q_embed
 
 
 class FlaxQwen25Attention(nn.Module):
@@ -281,7 +289,8 @@ class FlaxQwen25Attention(nn.Module):
         key = self._split_heads(key, self.num_key_value_heads)
         value = self._split_heads(value, self.num_key_value_heads)
 
-        key, query = self.rotary_emb(key, query, position_ids)
+        # Apply rotary embeddings - changed to match new implementation
+        key, query = self.rotary_emb(query, key, position_ids)
 
         query_length, key_length = query.shape[1], key.shape[1]
 
