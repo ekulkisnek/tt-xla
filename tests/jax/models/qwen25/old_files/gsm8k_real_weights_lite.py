@@ -33,17 +33,12 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 # Import the model implementation
-from . import (
-    AutoQwenModel,
-    AutoQwenModelTensorParallel,
-    get_model,
-    load_qwen_config,
-    create_device_mesh,
-    load_qwen_weights,
-    init_model_from_weights,
-    load_safetensors_index,
-    convert_weight_name_to_flax,
-)
+sys.path.append('/root/workingdir/tt-xla/tests/jax/models/failed-qwen2_5')
+from model_implementation import Qwen2ForCausalLM
+from config import load_qwen_config, get_qwen2_7b_config
+from tensor_parallel import create_device_mesh, AutoQwenModelTensorParallel
+from weight_loading import load_qwen_weights, init_model_from_weights, load_safetensors_index, convert_weight_name_to_flax
+import __init__ as qwen_init
 
 # Configure logging with timestamp
 logging.basicConfig(
@@ -450,7 +445,6 @@ def load_partial_weights(weights_path, num_layers, device_count):
         logging.info(f"Updated configuration for attention compatibility")
     
     # Create empty parameter structure for model
-    from tests.jax.models.qwen2_5.model_implementation import Qwen2ForCausalLM
     logging.info(f"Creating model with config: {json.dumps(config, indent=2)[:300]}...")
     model = Qwen2ForCausalLM(config=config)
     
@@ -599,7 +593,12 @@ def main():
                       help="Enable verbose logging")
     parser.add_argument("--temperature", type=float, default=0.0,
                       help="Sampling temperature (0 for greedy)")
+    parser.add_argument("--mesh_shape", type=str, default="1,1",
+                      help="Mesh shape for tensor parallelism, comma-separated (e.g., '1,8')")
     args = parser.parse_args()
+    
+    # Parse mesh shape
+    mesh_shape = tuple(map(int, args.mesh_shape.split(',')))
     
     # Configure logging based on verbosity
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -620,7 +619,7 @@ def main():
     logging.info(f"Found {num_devices} available devices")
     
     # Use a 1D mesh if only one device is available
-    requested_mesh_shape = (1, 1)
+    requested_mesh_shape = mesh_shape
     logging.info(f"Using requested mesh shape {requested_mesh_shape}")
     
     # Ensure we don't request more devices than available
@@ -680,8 +679,14 @@ def main():
         )
         
         # Initialize model with the reduced configuration
-        from tests.jax.models.qwen2_5.model_implementation import Qwen2ForCausalLM
-        model = Qwen2ForCausalLM(config=config)
+        model = qwen_init.get_model(
+            model_type="qwen2_5",
+            use_tensor_parallel=True if mesh_shape[1] > 1 else False,
+            mesh_shape=mesh_shape,
+            config=config,
+            dtype=jnp.bfloat16,
+            param_dtype=jnp.bfloat16
+        )
         
         # Load the GSM8K dataset
         examples = load_gsm8k_dataset(max_examples=args.max_examples)
