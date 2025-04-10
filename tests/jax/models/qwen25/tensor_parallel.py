@@ -533,8 +533,8 @@ class TensorParallelQwenTransformerBlock(nn.Module):
         
         # Layer normalization before self-attention
         hidden_states = RMSNorm(
-            dim=self.config["hidden_size"],
-            eps=self.config.get("rms_norm_eps", 1e-6),
+            config={"hidden_size": self.config["hidden_size"]},
+            epsilon=self.config.get("rms_norm_eps", 1e-6),
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             name="input_layernorm",
@@ -569,8 +569,8 @@ class TensorParallelQwenTransformerBlock(nn.Module):
         
         # Layer normalization before MLP
         hidden_states = RMSNorm(
-            dim=self.config["hidden_size"],
-            eps=self.config.get("rms_norm_eps", 1e-6),
+            config={"hidden_size": self.config["hidden_size"]},
+            epsilon=self.config.get("rms_norm_eps", 1e-6),
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             name="post_attention_layernorm",
@@ -696,8 +696,8 @@ class TensorParallelQwen2Model(nn.Module):
         
         # Final layer normalization
         hidden_states = RMSNorm(
-            dim=self.config["hidden_size"],
-            eps=self.config.get("rms_norm_eps", 1e-6),
+            config={"hidden_size": self.config["hidden_size"]},
+            epsilon=self.config.get("rms_norm_eps", 1e-6),
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             name="norm",

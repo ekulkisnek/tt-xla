@@ -22,6 +22,9 @@ from jax.sharding import PartitionSpec as P
 from tqdm import tqdm
 import safetensors.numpy
 
+# Import get_partition_specs from tensor_parallel
+from tensor_parallel import get_partition_specs
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -153,8 +156,8 @@ def load_qwen_weights(
         else:
             partition_specs = None
         
-        # Initialize the parameter dictionary
-        params = {}
+        # Initialize the parameter dictionary - using a flat structure first
+        flat_params = {}
         
         # Map of tensors to load directly from files
         file_handles = {}
@@ -290,10 +293,10 @@ def load_qwen_weights(
                     sharded_tensor = jax.device_put(tensor, array_sharding)
                     
                     # Add to parameters
-                    params[flax_name] = sharded_tensor
+                    flat_params[flax_name] = sharded_tensor
             else:
                 # No sharding needed
-                params[flax_name] = jnp.array(tensor)
+                flat_params[flax_name] = jnp.array(tensor)
             
             # Mark as loaded
             loaded_params.add(name)
@@ -315,9 +318,55 @@ def load_qwen_weights(
             if debug:
                 print("Missing parameters:", list(missing)[:10])
         
+        # Convert the flat parameter dictionary to the nested structure expected by Flax
+        # This is crucial for the model to work correctly
+        try:
+            params = {}
+            
+            # Group parameters by their collection (e.g., 'model', 'lm_head')
+            for key, value in flat_params.items():
+                # Split the parameter path
+                parts = key.split('/')
+                
+                # The first part is the collection name
+                collection = parts[0]
+                
+                # Initialize the collection if needed
+                if collection not in params:
+                    params[collection] = {}
+                
+                # Skip the collection name and join the rest of the path
+                param_path = '/'.join(parts[1:])
+                
+                # Build a dict containing the parameter path
+                current = params[collection]
+                parts = param_path.split('/')
+                
+                # Create nested dictionaries for each path component
+                for i, part in enumerate(parts[:-1]):
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                
+                # Set the parameter value at the leaf
+                current[parts[-1]] = value
+            
+            print(f"Successfully created nested parameter structure with collections: {list(params.keys())}")
+        except Exception as e:
+            print(f"Error creating nested parameter structure: {e}")
+            # Fall back to using unflatten_dict
+            try:
+                params = unflatten_dict(flat_params, sep='/')
+                print("Used unflatten_dict to create parameter structure")
+            except Exception as e2:
+                print(f"Error unflattening parameters: {e2}")
+                # Last resort - just use the flat structure
+                params = {'params': flat_params}
+                print("Using flat parameter structure as fallback")
+        
         total_time = time.time() - start_time
         print(f"✅ Weight loading completed in {total_time:.2f} seconds")
-        print(f"Loaded {len(params)} parameters")
+        print(f"Loaded {len(flat_params)} parameters")
         sys.stdout.flush()
         
         return params
