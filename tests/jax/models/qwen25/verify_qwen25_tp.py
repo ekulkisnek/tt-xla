@@ -7,6 +7,12 @@
 Verification script to confirm that the Qwen2.5-7B model supports tensor parallelism
 across all required mesh shapes: 2x4, 1x8, 1x32, 8x4.
 This is a requirement for the bounty.
+
+Usage
+cd to qwen25
+source venv/bin/activate
+export XLA_FLAGS="--xla_force_host_platform_device_count=32"
+python /Users/lu/Documents/b1-understanding/tt-xla/tests/jax/models/qwen25/verify_qwen25_tp.py --model_path /Users/lu/Documents/b1-understanding/tt-xla/tests/jax/models/qwen25
 """
 
 import os
