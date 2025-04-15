@@ -213,7 +213,6 @@ def verify_mesh_shape(model_path: str, mesh_shape: Tuple[int, int], use_demo_mod
                     mesh=mesh, 
                     dtype=jnp.bfloat16, 
                     param_dtype=jnp.bfloat16,
-                    batch_dim_mapping='batch',
                     sequence_dim_mapping=None if seq_dim <= 1 else 'sequence'
                 )
                 logger.info(f"[3.2/5] Model class initialized ({time.time() - init_start:.2f}s)")
