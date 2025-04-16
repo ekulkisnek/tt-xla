@@ -12,9 +12,10 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental import mesh_utils
+from jax import lax
 
 from model_implementation import (
     RMSNorm,
@@ -169,7 +170,7 @@ class TensorParallelDense(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     kernel_init: Any = nn.initializers.lecun_normal()
     bias_init: Any = nn.initializers.zeros
-    precision: Any = None
+    precision: Optional[Union[str, lax.Precision]] = None
     mesh: Mesh = None
     shard_axes: Tuple[str, str] = ('model', None)  # (kernel_in, kernel_out)
     
@@ -242,6 +243,26 @@ class TensorParallelDense(nn.Module):
         
         return y
 
+    def input_sharding_spec(self, dtype=jnp.float32):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
+
 class TensorParallelQwenAttention(nn.Module):
     """Tensor parallel implementation of QwenAttention."""
     config: Dict[str, Any]
@@ -306,6 +327,7 @@ class TensorParallelQwenAttention(nn.Module):
             features=n_heads_per_device * head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
@@ -317,6 +339,7 @@ class TensorParallelQwenAttention(nn.Module):
             features=n_kv_heads_per_device * head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
@@ -328,6 +351,7 @@ class TensorParallelQwenAttention(nn.Module):
             features=n_kv_heads_per_device * head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
@@ -339,6 +363,7 @@ class TensorParallelQwenAttention(nn.Module):
             features=self.config["hidden_size"],
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
@@ -581,11 +606,32 @@ class TensorParallelQwenAttention(nn.Module):
             
         return outputs
 
+    def input_sharding_spec(self, dtype=jnp.bfloat16):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
+
 class TensorParallelQwenMLP(nn.Module):
     """Tensor parallel implementation of QwenMLP."""
     config: Dict[str, Any]
     dtype: jnp.dtype = jnp.bfloat16
     param_dtype: jnp.dtype = jnp.bfloat16
+    precision: Optional[Union[str, lax.Precision]] = None
     mesh: Mesh = None
     
     @nn.compact
@@ -606,6 +652,7 @@ class TensorParallelQwenMLP(nn.Module):
             features=intermediate_size_per_device,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config["initializer_range"]),
             mesh=self.mesh,
@@ -617,6 +664,7 @@ class TensorParallelQwenMLP(nn.Module):
             features=intermediate_size_per_device,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config["initializer_range"]),
             mesh=self.mesh,
@@ -628,6 +676,7 @@ class TensorParallelQwenMLP(nn.Module):
             features=hidden_size,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             use_bias=False,
             kernel_init=nn.initializers.normal(self.config["initializer_range"]),
             mesh=self.mesh,
@@ -648,11 +697,32 @@ class TensorParallelQwenMLP(nn.Module):
         
         return output
 
+    def input_sharding_spec(self, dtype=jnp.bfloat16):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
+
 class TensorParallelQwenTransformerBlock(nn.Module):
     """Tensor parallel implementation of QwenTransformerBlock."""
     config: Dict[str, Any]
     dtype: jnp.dtype = jnp.bfloat16
     param_dtype: jnp.dtype = jnp.bfloat16
+    precision: Optional[Union[str, lax.Precision]] = None
     mesh: Mesh = None
     
     @nn.compact
@@ -683,6 +753,7 @@ class TensorParallelQwenTransformerBlock(nn.Module):
             config=self.config,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             mesh=self.mesh,
             name="self_attn",
         )(
@@ -719,6 +790,7 @@ class TensorParallelQwenTransformerBlock(nn.Module):
             config=self.config,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            precision=self.precision,
             mesh=self.mesh,
             name="mlp",
         )(hidden_states)
@@ -736,13 +808,34 @@ class TensorParallelQwenTransformerBlock(nn.Module):
             
         return outputs
 
+    def input_sharding_spec(self, dtype=jnp.bfloat16):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
+
 class TensorParallelQwen2Model(nn.Module):
     """Tensor parallel implementation of Qwen2Model."""
     config: Dict[str, Any]
     dtype: jnp.dtype = jnp.bfloat16
     param_dtype: jnp.dtype = jnp.bfloat16
     mesh: Mesh = None
-    
+    precision: Optional[Union[str, lax.Precision]] = None
+
     @nn.compact
     def __call__(
         self,
@@ -757,8 +850,8 @@ class TensorParallelQwen2Model(nn.Module):
         *args,
         **kwargs
     ):
-        """Apply the tensor parallel Qwen2 model."""
-        # Handle positional arguments
+        """Forward pass of Qwen2 model."""
+        # Handle positional arguments if passed that way
         if input_ids is None and args:
             input_ids = args[0]
             if len(args) > 1:
@@ -768,10 +861,10 @@ class TensorParallelQwen2Model(nn.Module):
             if len(args) > 3:
                 past_key_values = args[3]
         
-        # Extract shapes and define helper variables
+        # Extract shapes
         batch_size, seq_length = input_ids.shape
-        num_layers = self.config["num_hidden_layers"]
         
+        # Create attention mask if not provided
         if attention_mask is None:
             attention_mask = jnp.ones((batch_size, seq_length))
         
@@ -780,6 +873,7 @@ class TensorParallelQwen2Model(nn.Module):
         # Convert to the type needed for attention mechanism
         extended_attention_mask = (1.0 - extended_attention_mask) * jnp.finfo(self.dtype).min
         
+        # Create position IDs if not provided
         if position_ids is None:
             position_ids = jnp.arange(seq_length)[None, :]
         
@@ -787,42 +881,45 @@ class TensorParallelQwen2Model(nn.Module):
         past_length = 0
         if past_key_values is not None:
             past_length = past_key_values[0][0].shape[1]  # Using the key's sequence length
-            
             # Adjust position_ids to account for past keys and values
             position_ids = position_ids[:, past_length:seq_length + past_length]
         
-        # Embedding layer (token embeddings)
+        # Initialize embedding layer
+        # NOTE: Parameter name is 'weight' to match PyTorch weights
         embed_tokens = nn.Embed(
             num_embeddings=self.config["vocab_size"],
             features=self.config["hidden_size"],
+            embedding_init=nn.initializers.normal(stddev=0.02),
             dtype=self.dtype,
             param_dtype=self.param_dtype,
-            embedding_init=nn.initializers.normal(stddev=self.config["initializer_range"]),
             name="embed_tokens",
         )
         
-        # Get embeddings
+        # Get token embeddings
         hidden_states = embed_tokens(input_ids)
         
-        # Store all hidden states and attentions if requested
+        # Output lists for hidden states and attentions if requested
         all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        all_past_key_values = () if use_cache else None
+        all_self_attentions = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
         
-        # Create the transformer layers with tensor parallelism
+        # Process through transformer layers
         for i in range(self.config["num_hidden_layers"]):
-            # Store the hidden state for this layer if requested
+            # Save hidden state for output if requested
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
             
-            # Get layer-specific past key values
-            past_key_value = past_key_values[i] if past_key_values is not None else None
+            # Get past key value if using cache
+            past_key_value = None
+            if past_key_values is not None:
+                past_key_value = past_key_values[i]
             
-            # Apply the transformer block with tensor parallelism
+            # Process through transformer layer
             layer_outputs = TensorParallelQwenTransformerBlock(
                 config=self.config,
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
+                precision=self.precision,
                 mesh=self.mesh,
                 name=f"layers_{i}",
             )(
@@ -836,182 +933,345 @@ class TensorParallelQwen2Model(nn.Module):
             )
             
             # Update hidden states
-            hidden_states = layer_outputs[0]
-            
-            # Store past key values if requested
             if use_cache:
-                all_past_key_values = all_past_key_values + (layer_outputs[1],)
+                hidden_states, present_key_value = layer_outputs[:2]
+                next_decoder_cache = next_decoder_cache + (present_key_value,)
+            else:
+                hidden_states = layer_outputs[0]
             
-            # Store attention weights if requested
+            # Save attention if requested
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[-1],)
+                if use_cache:
+                    all_self_attentions = all_self_attentions + (layer_outputs[2],)
+                else:
+                    all_self_attentions = all_self_attentions + (layer_outputs[1],)
         
-        # Final layer normalization
+        # Apply final layer norm
         hidden_states = RMSNorm(
-            config={"hidden_size": self.config["hidden_size"]},
+            config=self.config,
             epsilon=self.config.get("rms_norm_eps", 1e-6),
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             name="norm",
         )(hidden_states)
         
-        # Store the final hidden state if requested
+        # Save final hidden state if requested
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
         
-        # Prepare outputs
+        # Prepare outputs tuple
+        if not use_cache and not output_hidden_states and not output_attentions:
+            return (hidden_states,)  # Always return a tuple for consistency
+        
         outputs = (hidden_states,)
         
         if use_cache:
-            outputs = outputs + (all_past_key_values,)
-        
+            outputs = outputs + (next_decoder_cache,)
         if output_hidden_states:
             outputs = outputs + (all_hidden_states,)
-            
         if output_attentions:
-            outputs = outputs + (all_attentions,)
-            
+            outputs = outputs + (all_self_attentions,)
+        
         return outputs
 
-class TensorParallelQwen2ForCausalLM(nn.Module):
-    """Tensor parallel implementation of Qwen2ForCausalLM."""
-    config: Dict[str, Any]
-    dtype: jnp.dtype = jnp.bfloat16
-    param_dtype: jnp.dtype = jnp.bfloat16
-    mesh: Mesh = None
+    def get_partition_rules(self):
+        """Return partition rules for tensor parallelism."""
+        return (
+            # Embedding partitioning
+            ("embed_tokens/embedding", P(None, "model")),
+            
+            # Layer norm parameters
+            ("layers_.*/(input|post_attention)_layernorm/weight", P(None)),
+            ("norm/weight", P(None)),
+            
+            # Attention parameters
+            ("layers_.*/self_attn/(q|k|v)_proj/kernel", P(None, "model")),
+            ("layers_.*/self_attn/o_proj/kernel", P("model", None)),
+            
+            # MLP parameters
+            ("layers_.*/mlp/(gate|up)_proj/kernel", P(None, "model")),
+            ("layers_.*/mlp/down_proj/kernel", P("model", None)),
+        )
+    
+    def get_params_partition_spec(self):
+        """Return the partition spec for the parameters."""
+        return {
+            # Embedding specs
+            "embed_tokens": {
+                "embedding": P(None, "model"),
+            },
+            # Layer norms
+            "norm": {
+                "weight": P(None),
+            },
+            # Recursive specs for layers
+            "layers": {
+                "[0-9]+": {
+                    "input_layernorm": {
+                        "weight": P(None),
+                    },
+                    "post_attention_layernorm": {
+                        "weight": P(None),
+                    },
+                    "self_attn": {
+                        "q_proj": {
+                            "kernel": P(None, "model"),
+                        },
+                        "k_proj": {
+                            "kernel": P(None, "model"),
+                        },
+                        "v_proj": {
+                            "kernel": P(None, "model"),
+                        },
+                        "o_proj": {
+                            "kernel": P("model", None),
+                        },
+                    },
+                    "mlp": {
+                        "gate_proj": {
+                            "kernel": P(None, "model"),
+                        },
+                        "up_proj": {
+                            "kernel": P(None, "model"),
+                        },
+                        "down_proj": {
+                            "kernel": P("model", None),
+                        },
+                    },
+                }
+            }
+        }
+    
+    def params_from_checkpoint(self, model_path):
+        """
+        Load parameters from checkpoint directory.
+        
+        Args:
+            model_path: Path to the checkpoint directory
+            
+        Returns:
+            Dictionary of parameters
+        """
+        from weight_loading import load_qwen_weights
+        
+        return load_qwen_weights(
+            model_path=model_path,
+            model=self,
+            config=self.config,
+            mesh=self.mesh,
+            param_dtype=self.param_dtype,
+            debug=False
+        )
+    
+    def input_sharding_spec(self, dtype=jnp.int32):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
 
-    @nn.compact
+class TensorParallelQwen2ForCausalLM(nn.Module):
+    """Tensor parallel implementation of Qwen2 for causal language modeling."""
+    config: Dict[str, Any]
+    mesh: Mesh = None
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    precision: Optional[Union[str, lax.Precision]] = None
+
+    def setup(self):
+        """Initialize the model."""
+        self.transformer = TensorParallelQwen2Model(
+            config=self.config,
+            mesh=self.mesh,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            precision=self.precision,
+        )
+        self.lm_head = TensorParallelDense(
+            features=self.config["vocab_size"],
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            precision=self.precision,
+            use_bias=False,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            mesh=self.mesh,
+            shard_axes=('model', None),
+            name="lm_head",
+        )
+
     def __call__(
         self,
-        input_ids=None,
+        input_ids,
         attention_mask=None,
         position_ids=None,
         past_key_values=None,
-        output_attentions=False,
-        output_hidden_states=False,
-        use_cache=False,
-        deterministic=True,
-        *args,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        use_cache=None,
+        mems=None,
         **kwargs
     ):
-        # Handle the case where input_ids is passed as positional arg
-        if input_ids is None and args:
-            input_ids = args[0]
-        
-        # Forward the base model
-        transformer_outputs = TensorParallelQwen2Model(
-            config=self.config,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            mesh=self.mesh,
-            name="model",
-        )(
+        """Forward pass of the model."""
+        transformer_outputs = self.transformer(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
             use_cache=use_cache,
-            deterministic=deterministic,
+            **kwargs
         )
+
+        # Check if transformer_outputs is a tuple or a single array
+        if isinstance(transformer_outputs, tuple):
+            hidden_states = transformer_outputs[0]
+        else:
+            # If it's not a tuple, it's just the hidden states
+            hidden_states = transformer_outputs
+            transformer_outputs = (hidden_states,)
         
-        hidden_states = transformer_outputs[0]
+        # Apply the LM head to the output embeddings
+        logits = self.lm_head(hidden_states)
+
+        if not return_dict:
+            if use_cache or output_hidden_states or output_attentions:
+                outputs = (logits,) + transformer_outputs[1:] 
+            else:
+                outputs = (logits,)
+            return outputs
         
-        # Apply the language modeling head
-        lm_logits = TensorParallelDense(
-            features=self.config["vocab_size"],
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
+        return {
+            "logits": logits,
+            "past_key_values": transformer_outputs[1] if len(transformer_outputs) > 1 else None,
+            "hidden_states": transformer_outputs[2] if len(transformer_outputs) > 2 else None,
+            "attentions": transformer_outputs[3] if len(transformer_outputs) > 3 else None,
+        }
+
+    def get_partition_rules(self):
+        """Return partition rules for tensor parallelism."""
+        rules = []
+        rules.extend(self.transformer.get_partition_rules())
+        rules.extend(self.lm_head.get_partition_rules())
+        return tuple(rules)
+
+    def get_params_partition_spec(self):
+        """Return the partition spec for the parameters."""
+        specs = {}
+        specs.update(self.transformer.get_params_partition_spec())
+        specs.update(self.lm_head.get_params_partition_spec())
+        return specs
+        
+    def params_from_checkpoint(self, model_path):
+        """
+        Load parameters from checkpoint directory.
+        
+        Args:
+            model_path: Path to the checkpoint directory
+            
+        Returns:
+            Dictionary of parameters
+        """
+        from weight_loading import load_qwen_weights
+        
+        return load_qwen_weights(
+            model_path=model_path,
+            model=self,
+            config=self.config,
             mesh=self.mesh,
-            shard_axes=('model', None),
-            name="lm_head",
-        )(hidden_states)
-        
-        # Prepare outputs - logits first, then the rest in order
-        outputs = (lm_logits,) + transformer_outputs[1:]
-        
-        return outputs
+            param_dtype=self.param_dtype,
+            debug=False
+        )
     
-    def input_sharding_spec(self, dtype=jnp.bfloat16):
-        """Return the appropriate sharding spec for inputs."""
+    def input_sharding_spec(self, dtype=jnp.int32):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
         if self.mesh is None:
             return None
             
-        # Get mesh axes
-        mesh_axes = self.mesh.axis_names
-        
-        # Create appropriate specs based on mesh axes
-        if 'batch' in mesh_axes and 'model' in mesh_axes:
-            batch_axis = 'batch'
-            return jax.sharding.NamedSharding(self.mesh, P(batch_axis, None))
-        elif len(mesh_axes) >= 2:
-            # Use first axis for batch
-            batch_axis = mesh_axes[0]
-            return jax.sharding.NamedSharding(self.mesh, P(batch_axis, None))
-        else:
-            # No appropriate sharding available
-            return None
-            
-    def params_from_checkpoint(self, checkpoint_path=None):
-        """Load parameters from a checkpoint."""
-        from weight_loading import load_qwen_weights
-        
-        # Get default path from config if not provided
-        if checkpoint_path is None and isinstance(self.config, dict) and "model_path" in self.config:
-            checkpoint_path = self.config["model_path"]
-            
-        if checkpoint_path is None:
-            raise ValueError("No checkpoint path provided")
-            
-        # Load weights
-        try:
-            # Try to load with mesh context if mesh is available
-            if self.mesh is not None:
-                with self.mesh:
-                    return load_qwen_weights(
-                        model_path=checkpoint_path,
-                        model=self,
-                        config=self.config,
-                        mesh=self.mesh,
-                        param_dtype=self.param_dtype
-                    )
-            # Otherwise load without mesh context
-            return load_qwen_weights(
-                model_path=checkpoint_path,
-                model=self,
-                config=self.config,
-                mesh=self.mesh,
-                param_dtype=self.param_dtype
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to load weights from {checkpoint_path}: {e}")
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        )
 
 class TensorParallelQwenEmbed(nn.Module):
-    """Tensor parallel module for QwenEmbed."""
-
+    """Tensor parallel implementation of embedding layer."""
     config: Dict[str, Any]
-    dtype: jnp.dtype = jnp.float16
+    mesh: Mesh = None
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    precision: Optional[Union[str, lax.Precision]] = None
 
     def setup(self):
-        # Use local helper class to set up the embedding
-        self.embed = QwenEmbed(self.config, dtype=self.dtype)
+        """Initialize the embedding layer."""
+        vocab_size = self.config["vocab_size"]
+        hidden_size = self.config["hidden_size"]
+        
+        # Define the embedding parameter
+        self.embedding = self.param(
+            "weight",  # Using 'weight' to match PyTorch naming
+            nn.initializers.normal(stddev=0.02),
+            (vocab_size, hidden_size),
+            self.param_dtype,
+        )
 
-    def __call__(
-        self,
-        input_ids: jnp.ndarray,
-        *,
-        position_ids: jnp.ndarray,
-    ) -> jnp.ndarray:
-        return self.embed(input_ids, position_ids=position_ids)
+    def __call__(self, x):
+        """Embed the input tokens."""
+        embedding = self.embedding.astype(self.dtype)
+        return jnp.asarray(jnp.take(embedding, x, axis=0), dtype=self.dtype)
 
-    @staticmethod
-    def get_params_partition_spec():
-        """Get the partition specs for the parameters in this module."""
-        # the parameters in QwenEmbed do not get sharded
+    def get_partition_rules(self):
+        """Return partition rules for tensor parallelism."""
+        return (
+            ("weight", PartitionSpec(None, "model")),
+        )
+
+    def get_params_partition_spec(self):
+        """Return the partition spec for the parameters."""
         return {
-            "embed": {
-                "wte": None,
-                "wpe": None,
-            }
-        } 
+            "weight": PartitionSpec(None, "model"),
+        }
+
+    def input_sharding_spec(self, dtype=jnp.int32):
+        """
+        Return the sharding spec for input tensors.
+        
+        Args:
+            dtype: Data type of the input tensors
+            
+        Returns:
+            JAX sharding for inputs
+        """
+        if self.mesh is None:
+            return None
+            
+        # Create a sharding object that properly distributes inputs
+        # across the mesh according to the batch dimension
+        return jax.sharding.NamedSharding(
+            self.mesh, 
+            P('batch', None)  # Shard across batch dimension
+        ) 

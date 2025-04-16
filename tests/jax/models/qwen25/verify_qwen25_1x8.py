@@ -51,29 +51,6 @@ from config import load_qwen_config, get_qwen2_7b_config, get_small_config
 from weight_loading import load_qwen_weights
 
 
-def modify_weight_loading_for_pytorch26():
-    """
-    Patch the torch.load function to handle PyTorch 2.6's weight_only change.
-    This is a temporary fix to work around the issue with PyTorch 2.6.
-    """
-    try:
-        import torch
-        original_torch_load = torch.load
-        
-        # Create patched version with weights_only=False
-        def patched_torch_load(f, *args, **kwargs):
-            # Set weights_only to False by default
-            if 'weights_only' not in kwargs:
-                kwargs['weights_only'] = False
-            return original_torch_load(f, *args, **kwargs)
-        
-        # Replace the original function
-        torch.load = patched_torch_load
-        logger.info("✅ Applied patch for PyTorch 2.6 weights_only parameter")
-    except ImportError:
-        logger.warning("⚠️ Could not patch torch.load (torch not imported yet)")
-
-
 def setup_tokenizer(tokenizer_path=None):
     """Set up the tokenizer."""
     try:
@@ -239,9 +216,6 @@ def verify_1x8_mesh(model_path: str, use_demo_model: bool = False, max_tokens: i
                 params = model.init(rng, input_ids=input_ids)
                 logger.info(f"✅ Model initialized with random weights in {time.time() - start_time:.2f} seconds")
             else:
-                # Apply patch for PyTorch 2.6 weight loading
-                modify_weight_loading_for_pytorch26()
-                
                 # Load weights from checkpoint
                 logger.info(f"Loading model weights from {model_path}...")
                 try:
