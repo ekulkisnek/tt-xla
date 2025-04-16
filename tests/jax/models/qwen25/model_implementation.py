@@ -17,56 +17,31 @@ logger = logging.getLogger(__name__)
 
 # Add a custom embed class to handle parameter name differences
 class QwenEmbed(nn.Module):
-    """Custom embedding module for Qwen2.5 that uses 'embedding' as parameter name by default."""
-    num_embeddings: int
-    features: int
-    dtype: jnp.dtype = jnp.bfloat16
-    param_dtype: jnp.dtype = jnp.bfloat16
-    embedding_init: Callable = nn.initializers.normal(stddev=0.02)
-    param_name: str = 'embedding'  # Match name in QWEN_PARAMETER_MAPPING
-    
+    """Token embeddings for Qwen."""
+    vocab_size: int
+    hidden_size: int
+    param_dtype: jnp.dtype = jnp.float32
+    dtype: jnp.dtype = jnp.float32
+    embedding_init: Callable[..., jnp.ndarray] = nn.initializers.normal(stddev=0.02)
+
     @nn.compact
-    def __call__(self, inputs):
-        """Apply the embedding to inputs with the specified parameter name."""
-        # Log that we're accessing the embedding parameter
-        logger.info(f"Accessing embedding parameter in module {self.name}")
+    def __call__(self, input_ids: jnp.ndarray) -> jnp.ndarray:
+        # Initialize the embedding table - use standard HF parameter name "weight" instead of "embedding"
+        inputs_embeds = self.param(
+            "weight",
+            self.embedding_init,
+            (self.vocab_size, self.hidden_size),
+            self.param_dtype,
+        )
         
-        # Initialize with a default embedding
-        embedding = None
+        # Log init of embedding
+        if input_ids.size == 0:
+            logging.warning("Empty input_ids passed to QwenEmbed")
+            return jnp.zeros((0, self.hidden_size), dtype=self.dtype)
         
-        # Try with different parameter names
-        param_names = ['embedding', 'kernel', 'weight']
-        exceptions = []
-        
-        for name in param_names:
-            try:
-                embedding = self.param(
-                    name,
-                    self.embedding_init,
-                    (self.num_embeddings, self.features),
-                    self.param_dtype,
-                )
-                logger.info(f"Successfully loaded embedding parameter with name '{name}', shape {embedding.shape}")
-                break
-            except Exception as e:
-                exceptions.append((name, str(e)))
-                logger.warning(f"Could not load embedding with name '{name}': {str(e)}")
-        
-        # If we couldn't load with any names, create a dummy embedding and log the errors
-        if embedding is None:
-            logger.error(f"Failed to load embedding with any of these names: {param_names}")
-            for name, error in exceptions:
-                logger.error(f"  {name}: {error}")
-            
-            # Create a dummy embedding with the correct shape
-            logger.warning(f"Creating a dummy embedding with shape {(self.num_embeddings, self.features)}")
-            embedding = jnp.zeros((self.num_embeddings, self.features), dtype=self.param_dtype)
-        
-        # Convert to the correct dtype
-        embedding = embedding.astype(self.dtype)
-        
-        # Apply the embedding lookup
-        return jnp.take(embedding, inputs, axis=0)
+        # Use standard take operation
+        embeds = jnp.take(inputs_embeds, input_ids, axis=0)
+        return embeds.astype(self.dtype)
 
 class RMSNorm(nn.Module):
     """RMSNorm implementation."""

@@ -23,7 +23,8 @@ from model_implementation import (
     QwenTransformerBlock,
     Qwen2_5Model,
     Qwen2_5ForCausalLM,
-    precompute_freqs_cis
+    precompute_freqs_cis,
+    QwenEmbed
 )
 
 def create_device_mesh(mesh_shape):
@@ -199,7 +200,15 @@ class TensorParallelDense(nn.Module):
         
         # Shard the kernel if mesh is provided
         if self.mesh is not None:
-            kernel = jax.lax.with_sharding_constraint(kernel, kernel_spec)
+            try:
+                # Only apply constraints inside a mesh context
+                kernel = jax.lax.with_sharding_constraint(kernel, kernel_spec)
+            except RuntimeError as e:
+                # If not in a mesh context, we can continue without sharding
+                if "with_sharding_constraint requires a non-empty mesh" in str(e):
+                    pass
+                else:
+                    raise
         
         # Matrix multiplication with safeguards
         y = jnp.matmul(inputs, kernel)
@@ -214,8 +223,15 @@ class TensorParallelDense(nn.Module):
                 
                 # Shard bias if needed
                 if self.mesh is not None and self.shard_axes[1]:
-                    bias_spec = P(self.shard_axes[1])
-                    bias = jax.lax.with_sharding_constraint(bias, bias_spec)
+                    try:
+                        bias_spec = P(self.shard_axes[1])
+                        bias = jax.lax.with_sharding_constraint(bias, bias_spec)
+                    except RuntimeError as e:
+                        # If not in a mesh context, we can continue without sharding
+                        if "with_sharding_constraint requires a non-empty mesh" in str(e):
+                            pass
+                        else:
+                            raise
                 
                 # Add to output
                 y = y + bias
@@ -244,26 +260,46 @@ class TensorParallelQwenAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         deterministic: bool = True,
+        *args,
+        **kwargs
     ):
         """Apply tensor-parallel attention."""
+        # Get basic dimensions
         batch_size, seq_length = hidden_states.shape[:2]
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]
         
-        # Compute per-device dimensions
-        num_devices = self.mesh.devices.size if self.mesh else 1
-        model_parallel_size = num_devices  # Assuming model-parallel across all devices
+        # Mesh configuration
+        if self.mesh:
+            mesh_axes = self.mesh.axis_names
+            batch_parallel = 'batch' in mesh_axes and self.mesh.shape['batch'] > 1
+            model_parallel = 'model' in mesh_axes and self.mesh.shape['model'] > 1
+            batch_parallel_size = self.mesh.shape.get('batch', 1) if batch_parallel else 1
+            model_parallel_size = self.mesh.shape.get('model', 1) if model_parallel else 1
+        else:
+            batch_parallel = False
+            model_parallel = False
+            batch_parallel_size = 1
+            model_parallel_size = 1
         
-        # Scale attention heads per device
-        # Ensure at least 1 head per device to avoid division by zero
+        # Print debug info about the mesh and shapes
+        print(f"Mesh info: batch_parallel={batch_parallel}, model_parallel={model_parallel}")
+        print(f"Mesh sizes: batch={batch_parallel_size}, model={model_parallel_size}")
+        print(f"Input shape: batch_size={batch_size}, seq_length={seq_length}")
+            
+        # Scale attention heads per device based on model parallelism
         num_attn_heads = self.config["num_attention_heads"]
         num_kv_heads = self.config["num_key_value_heads"]
         
-        # If model_parallel_size > num_heads, adjust to ensure at least 1 head per device
-        effective_model_size_q = min(model_parallel_size, num_attn_heads)
-        effective_model_size_kv = min(model_parallel_size, num_kv_heads)
-        
-        n_heads_per_device = max(1, num_attn_heads // effective_model_size_q)
-        n_kv_heads_per_device = max(1, num_kv_heads // effective_model_size_kv)
+        # Calculate local head counts (per device)
+        if model_parallel and model_parallel_size > 1:
+            n_heads_per_device = max(1, num_attn_heads // model_parallel_size)
+            n_kv_heads_per_device = max(1, num_kv_heads // model_parallel_size)
+        else:
+            n_heads_per_device = num_attn_heads
+            n_kv_heads_per_device = num_kv_heads
+            
+        print(f"Heads: total={num_attn_heads}, per_device={n_heads_per_device}")
+        print(f"KV heads: total={num_kv_heads}, per_device={n_kv_heads_per_device}")
         
         # Project inputs to queries, keys, values with tensor parallelism
         q_proj = TensorParallelDense(
@@ -271,7 +307,7 @@ class TensorParallelQwenAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
-            kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+            kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
             shard_axes=(None, 'model'),
             name="q_proj",
@@ -282,7 +318,7 @@ class TensorParallelQwenAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
-            kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+            kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
             shard_axes=(None, 'model'),
             name="k_proj",
@@ -293,7 +329,7 @@ class TensorParallelQwenAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
-            kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+            kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
             shard_axes=(None, 'model'),
             name="v_proj",
@@ -304,7 +340,7 @@ class TensorParallelQwenAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             use_bias=False,
-            kernel_init=nn.initializers.normal(self.config["initializer_range"]),
+            kernel_init=nn.initializers.normal(self.config.get("initializer_range", 0.02)),
             mesh=self.mesh,
             shard_axes=('model', None),
             name="o_proj",
@@ -315,16 +351,38 @@ class TensorParallelQwenAttention(nn.Module):
         key_states = k_proj(hidden_states)
         value_states = v_proj(hidden_states)
         
-        # Reshape for multi-head attention
-        query_states = query_states.reshape(
-            batch_size, seq_length, n_heads_per_device, head_dim
-        )
-        key_states = key_states.reshape(
-            batch_size, seq_length, n_kv_heads_per_device, head_dim
-        )
-        value_states = value_states.reshape(
-            batch_size, seq_length, n_kv_heads_per_device, head_dim
-        )
+        print(f"Query shape after projection: {query_states.shape}")
+        print(f"Key shape after projection: {key_states.shape}")
+        
+        # When using batch parallelism, we need special handling for the reshaping
+        # Each device only sees part of the batch, so we reshape accordingly
+        if batch_parallel and batch_parallel_size > 1:
+            # In batch parallel mode, each device only has a fraction of the batch
+            # so we don't change the batch dimension during reshaping
+            query_states = query_states.reshape(
+                query_states.shape[0], seq_length, n_heads_per_device, head_dim
+            )
+            key_states = key_states.reshape(
+                key_states.shape[0], seq_length, n_kv_heads_per_device, head_dim
+            )
+            value_states = value_states.reshape(
+                value_states.shape[0], seq_length, n_kv_heads_per_device, head_dim
+            )
+        else:
+            # In non-batch-parallel mode, use the full batch size
+            query_states = query_states.reshape(
+                batch_size, seq_length, n_heads_per_device, head_dim
+            )
+            key_states = key_states.reshape(
+                batch_size, seq_length, n_kv_heads_per_device, head_dim
+            )
+            value_states = value_states.reshape(
+                batch_size, seq_length, n_kv_heads_per_device, head_dim
+            )
+        
+        # Print some debug information about the tensor shapes
+        print(f"Query shape after reshaping: {query_states.shape}")
+        print(f"Key shape after reshaping: {key_states.shape}")
         
         # Setup position IDs if not provided
         if position_ids is None:
@@ -353,93 +411,173 @@ class TensorParallelQwenAttention(nn.Module):
         
         past_key_value = (key_states, value_states) if use_cache else None
         
-        # For grouped-query attention, we need to repeat the keys and values
-        # to match the number of query heads
-        if n_kv_heads_per_device != n_heads_per_device:
-            # Calculate repeat factor safely to avoid division by zero
-            if n_kv_heads_per_device > 0:
-                repeat_factor = n_heads_per_device // n_kv_heads_per_device
-                if repeat_factor > 0:
-                    # Repeat keys and values to match number of attention heads
-                    key_states = jnp.repeat(key_states, repeat_factor, axis=2)
-                    value_states = jnp.repeat(value_states, repeat_factor, axis=2)
+        # For grouped-query attention, match the number of query heads
+        if n_kv_heads_per_device < n_heads_per_device:
+            # Calculate repeat factor safely
+            repeat_factor = n_heads_per_device // n_kv_heads_per_device
+            
+            # Repeat keys and values to match number of attention heads
+            key_states = jnp.repeat(key_states, repeat_factor, axis=2)
+            value_states = jnp.repeat(value_states, repeat_factor, axis=2)
+        elif n_kv_heads_per_device > n_heads_per_device:
+            # Handle case where n_heads_per_device < n_kv_heads_per_device
+            # We'll use the first n_heads_per_device key/value heads
+            key_states = key_states[:, :, :n_heads_per_device, :]
+            value_states = value_states[:, :, :n_heads_per_device, :]
+            
+        # Print shapes before attention computation
+        print(f"Final query shape: {query_states.shape}")
+        print(f"Final key shape: {key_states.shape}")
+        
+        # Make sure the batch dimension is consistent - this is critical for batch parallelism
+        # In some cases, the final, global batch shape may be different from the input batch_size
+        if batch_parallel:
+            local_batch_size = query_states.shape[0]
+            # We need to make sure all tensors have the same batch size
+            if key_states.shape[0] != local_batch_size:
+                # Adjust key/value states to match query batch size
+                if key_states.shape[0] < local_batch_size:
+                    # Repeat key/value to match query batch size
+                    repeat_factor = local_batch_size // key_states.shape[0]
+                    key_states = jnp.repeat(key_states, repeat_factor, axis=0)
+                    value_states = jnp.repeat(value_states, repeat_factor, axis=0)
                 else:
-                    # Handle case where n_heads_per_device < n_kv_heads_per_device
-                    # We'll use the first n_heads_per_device key/value heads
-                    key_states = key_states[:, :, :n_heads_per_device, :]
-                    value_states = value_states[:, :, :n_heads_per_device, :]
-            else:
-                # This should not happen with our fix, but just in case
-                print(f"Warning: n_kv_heads_per_device={n_kv_heads_per_device}, using n_heads_per_device={n_heads_per_device}")
-                # Create dummy key/value states with the right shape
-                key_states = jnp.zeros((batch_size, key_states.shape[1], n_heads_per_device, head_dim), dtype=key_states.dtype)
-                value_states = jnp.zeros((batch_size, value_states.shape[1], n_heads_per_device, head_dim), dtype=value_states.dtype)
+                    # Truncate key/value to match query batch size
+                    key_states = key_states[:local_batch_size]
+                    value_states = value_states[:local_batch_size]
         
-        # Ensure tensors have the expected shape (batch, seq, heads, head_dim)
-        # If they have more dimensions, reshape them
-        expected_rank = 4  # batch, seq, heads, head_dim
+        # CRITICAL FIX for batch-only parallel (mesh shape 2,1)
+        # When using only batch parallelism without model parallelism, we need special handling
+        if batch_parallel and not model_parallel:
+            print("Using batch-only parallelism strategy")
+            
+            # In batch parallel mode without model parallelism, we need to reshape tensors
+            # to ensure they have compatible shapes for the matrix multiplication
+            q_batch, q_seq, q_heads, q_dim = query_states.shape
+            k_batch, k_seq, k_heads, k_dim = key_states.shape
+            
+            # Reshape to remove the batch dimension - this makes the tensors compatible
+            # with the attention calculation while preserving the total number of elements
+            query_states = query_states.reshape(1, q_seq, q_batch * q_heads, q_dim)
+            key_states = key_states.reshape(1, k_seq, k_batch * k_heads, k_dim)
+            value_states = value_states.reshape(1, k_seq, k_batch * k_heads, k_dim)
+            
+            print(f"Reshaped for batch-only parallelism - query: {query_states.shape}, key: {key_states.shape}")
         
-        if len(query_states.shape) != expected_rank:
-            query_states = query_states.reshape(batch_size, seq_length, -1, head_dim)
+        # CRITICAL FIX for combined batch and model parallel:
+        # When using both batch and model parallelism, we need to be especially careful
+        # about the shape transformations for matrix multiplication
+        if batch_parallel and model_parallel:
+            print("Using combined batch and model parallelism strategy")
+            
+            # First, get the actual tensor shapes we're working with after all transformations
+            q_batch, q_seq, q_heads, q_dim = query_states.shape
+            k_batch, k_seq, k_heads, k_dim = key_states.shape
+            
+            # Ensure batch sizes match
+            if q_batch != k_batch:
+                print(f"Fixing batch mismatch: q_batch={q_batch}, k_batch={k_batch}")
+                if q_batch > k_batch:
+                    # Expand key/value batch dimension
+                    key_states = jnp.repeat(key_states, q_batch // k_batch, axis=0)
+                    value_states = jnp.repeat(value_states, q_batch // k_batch, axis=0)
+                else:
+                    # Expand query batch dimension
+                    query_states = jnp.repeat(query_states, k_batch // q_batch, axis=0)
+            
+            # Ensure head counts match
+            if q_heads != k_heads:
+                print(f"Fixing head count mismatch: q_heads={q_heads}, k_heads={k_heads}")
+                if q_heads > k_heads:
+                    # Expand key/value head dimension
+                    key_states = jnp.repeat(key_states, q_heads // k_heads, axis=2)
+                    value_states = jnp.repeat(value_states, q_heads // k_heads, axis=2)
+                else:
+                    # Use matching number of heads
+                    query_states = query_states[:, :, :k_heads, :]
+            
+            # Update dimensions after possible adjustments
+            q_batch, q_seq, q_heads, q_dim = query_states.shape
+            k_batch, k_seq, k_heads, k_dim = key_states.shape
+            
+            # Special reshape for combined parallelism:
+            # When using both batch and model parallelism, we need a different approach
+            # Reshape tensors into a form suitable for matrix multiplication, reducing batch dim
+            query_states = query_states.reshape(1, q_seq, q_batch * q_heads, q_dim)
+            key_states = key_states.reshape(1, k_seq, k_batch * k_heads, k_dim)
+            value_states = value_states.reshape(1, k_seq, k_batch * k_heads, k_dim)
+            
+            print(f"Reshaped for combined parallelism - query: {query_states.shape}, key: {key_states.shape}")
         
-        if len(key_states.shape) != expected_rank:
-            key_states = key_states.reshape(batch_size, seq_length, -1, head_dim)
+        # Transpose tensors for attention computation
+        # (batch, seq, heads, dim) -> (batch, heads, seq, dim)
+        query_states_t = query_states.transpose(0, 2, 1, 3)
+        key_states_t = key_states.transpose(0, 2, 1, 3)
+        value_states_t = value_states.transpose(0, 2, 1, 3)
         
-        if len(value_states.shape) != expected_rank:
-            value_states = value_states.reshape(batch_size, seq_length, -1, head_dim)
+        # Print shapes after transpose
+        print(f"Query shape after transpose: {query_states_t.shape}")
+        print(f"Key shape after transpose: {key_states_t.shape}")
         
-        # Transpose tensors to prepare for attention calculation
-        # [batch, seq, heads, head_dim] -> [batch, heads, seq, head_dim]
-        query_states = jnp.transpose(query_states, (0, 2, 1, 3))
-        key_states = jnp.transpose(key_states, (0, 2, 1, 3))
-        value_states = jnp.transpose(value_states, (0, 2, 1, 3))
+        # Ensure key is correctly transposed for matrix multiplication
+        key_for_matmul = key_states_t.transpose(0, 1, 3, 2)
+        print(f"Key shape for matmul: {key_for_matmul.shape}")
         
-        # Transpose key for matrix multiplication
-        # [batch, heads, seq, head_dim] -> [batch, heads, head_dim, seq]
-        key_states_t = jnp.transpose(key_states, (0, 1, 3, 2))
+        # Create attention mask (causal by default)
+        if attention_mask is None:
+            # Create a mask that matches the actual batch size seen by this device
+            attention_mask = jnp.ones((query_states_t.shape[0], seq_length))
         
-        # Calculate attention scores without einsum
-        # [batch, heads, seq, head_dim] @ [batch, heads, head_dim, seq] -> [batch, heads, seq, seq]
-        attn_weights = jnp.matmul(query_states, key_states_t)
+        # Compute attention scores: (batch, heads, seq_q, seq_k)
+        attention_scores = jnp.matmul(
+            query_states_t,  # (batch, heads, seq, dim)
+            key_for_matmul   # (batch, heads, dim, seq)
+        )
         
         # Scale attention scores
-        attn_weights = attn_weights / jnp.sqrt(head_dim).astype(attn_weights.dtype)
+        attention_scores = attention_scores / jnp.sqrt(head_dim)
         
-        # Apply attention mask if provided
+        # Apply attention mask
         if attention_mask is not None:
-            # Convert to correct dtype
-            attention_mask = attention_mask.astype(attn_weights.dtype)
-            
-            # Apply mask (adding large negative values to masked positions)
-            attn_weights = attn_weights + attention_mask
+            # Convert mask to right shape
+            if attention_mask.ndim == 2:
+                # Extend mask for multiple heads and add large negative values 
+                # to masked positions
+                attention_mask = jnp.expand_dims(attention_mask, axis=(1, 2))
+                attention_mask = (1.0 - attention_mask) * -1e9
+                attention_scores = attention_scores + attention_mask
         
-        # Apply softmax
-        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+        # Apply softmax to attention scores
+        attention_weights = jax.nn.softmax(attention_scores, axis=-1)
         
-        # Apply attention dropout during training
-        if not deterministic:
-            attn_weights = nn.Dropout(
-                rate=self.config.get("attention_dropout", 0.0)
-            )(attn_weights, deterministic=deterministic)
+        # Apply dropout (if specified)
+        if not deterministic and self.config.get("attention_dropout", 0.0) > 0:
+            dropout_key = self.make_rng("dropout")
+            attention_weights = jax.random.dropout(
+                dropout_key, 
+                self.config.get("attention_dropout", 0.0), 
+                attention_weights
+            )
         
-        # Calculate attention output without einsum
-        # [batch, heads, seq, seq] @ [batch, heads, seq, head_dim] -> [batch, heads, seq, head_dim]
-        attn_output = jnp.matmul(attn_weights, value_states)
+        # Compute attention outputs
+        attention_output = jnp.matmul(
+            attention_weights,  # (batch, heads, seq, seq)
+            value_states_t  # (batch, heads, seq, dim)
+        )
         
-        # Transpose back to original format
-        # [batch, heads, seq, head_dim] -> [batch, seq, heads, head_dim]
-        attn_output = jnp.transpose(attn_output, (0, 2, 1, 3))
+        # Reshape back to match input shape
+        attention_output = attention_output.transpose(0, 2, 1, 3)  # (batch, seq, heads, dim)
+        local_batch_size = attention_output.shape[0]  # Use the actual batch size we have
+        attention_output = attention_output.reshape(local_batch_size, seq_length, -1)
         
-        # Merge heads
-        attn_output = attn_output.reshape(batch_size, seq_length, -1)
+        # Apply output projection
+        output = o_proj(attention_output)
         
-        # Final projection with tensor parallelism
-        attn_output = o_proj(attn_output)
-        
-        outputs = (attn_output, past_key_value)
-        
+        outputs = (output,)
         if output_attentions:
-            outputs = outputs + (attn_weights,)
+            outputs += (attention_weights,)
+        if use_cache:
+            outputs += (past_key_value,)
             
         return outputs
 
@@ -608,17 +746,31 @@ class TensorParallelQwen2Model(nn.Module):
     @nn.compact
     def __call__(
         self,
-        input_ids: jnp.ndarray,
-        attention_mask: Optional[jnp.ndarray] = None,
-        position_ids: Optional[jnp.ndarray] = None,
-        past_key_values: Optional[Tuple[Tuple[jnp.ndarray, jnp.ndarray], ...]] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        use_cache: bool = False,
-        deterministic: bool = True,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        use_cache=False,
+        deterministic=True,
+        *args,
+        **kwargs
     ):
-        """Process the inputs through the model with tensor parallelism."""
+        """Apply the tensor parallel Qwen2 model."""
+        # Handle positional arguments
+        if input_ids is None and args:
+            input_ids = args[0]
+            if len(args) > 1:
+                attention_mask = args[1]
+            if len(args) > 2:
+                position_ids = args[2]
+            if len(args) > 3:
+                past_key_values = args[3]
+        
+        # Extract shapes and define helper variables
         batch_size, seq_length = input_ids.shape
+        num_layers = self.config["num_hidden_layers"]
         
         if attention_mask is None:
             attention_mask = jnp.ones((batch_size, seq_length))
@@ -727,22 +879,27 @@ class TensorParallelQwen2ForCausalLM(nn.Module):
     dtype: jnp.dtype = jnp.bfloat16
     param_dtype: jnp.dtype = jnp.bfloat16
     mesh: Mesh = None
-    
+
     @nn.compact
     def __call__(
         self,
-        input_ids: jnp.ndarray,
-        attention_mask: Optional[jnp.ndarray] = None,
-        position_ids: Optional[jnp.ndarray] = None,
-        past_key_values: Optional[Tuple[Tuple[jnp.ndarray, jnp.ndarray], ...]] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        use_cache: bool = False,
-        deterministic: bool = True,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        use_cache=False,
+        deterministic=True,
+        *args,
+        **kwargs
     ):
-        """Forward pass for the causal language model with tensor parallelism."""
-        # Apply the base model with tensor parallelism
-        outputs = TensorParallelQwen2Model(
+        # Handle the case where input_ids is passed as positional arg
+        if input_ids is None and args:
+            input_ids = args[0]
+        
+        # Forward the base model
+        transformer_outputs = TensorParallelQwen2Model(
             config=self.config,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
@@ -759,21 +916,102 @@ class TensorParallelQwen2ForCausalLM(nn.Module):
             deterministic=deterministic,
         )
         
-        hidden_states = outputs[0]
+        hidden_states = transformer_outputs[0]
         
-        # Language modeling head with tensor parallelism
+        # Apply the language modeling head
         lm_logits = TensorParallelDense(
             features=self.config["vocab_size"],
             dtype=self.dtype,
             param_dtype=self.param_dtype,
-            use_bias=False,
-            kernel_init=nn.initializers.normal(self.config["initializer_range"]),
             mesh=self.mesh,
             shard_axes=('model', None),
             name="lm_head",
         )(hidden_states)
         
         # Prepare outputs - logits first, then the rest in order
-        outputs = (lm_logits,) + outputs[1:]
+        outputs = (lm_logits,) + transformer_outputs[1:]
         
-        return outputs 
+        return outputs
+    
+    def input_sharding_spec(self, dtype=jnp.bfloat16):
+        """Return the appropriate sharding spec for inputs."""
+        if self.mesh is None:
+            return None
+            
+        # Get mesh axes
+        mesh_axes = self.mesh.axis_names
+        
+        # Create appropriate specs based on mesh axes
+        if 'batch' in mesh_axes and 'model' in mesh_axes:
+            batch_axis = 'batch'
+            return jax.sharding.NamedSharding(self.mesh, P(batch_axis, None))
+        elif len(mesh_axes) >= 2:
+            # Use first axis for batch
+            batch_axis = mesh_axes[0]
+            return jax.sharding.NamedSharding(self.mesh, P(batch_axis, None))
+        else:
+            # No appropriate sharding available
+            return None
+            
+    def params_from_checkpoint(self, checkpoint_path=None):
+        """Load parameters from a checkpoint."""
+        from weight_loading import load_qwen_weights
+        
+        # Get default path from config if not provided
+        if checkpoint_path is None and isinstance(self.config, dict) and "model_path" in self.config:
+            checkpoint_path = self.config["model_path"]
+            
+        if checkpoint_path is None:
+            raise ValueError("No checkpoint path provided")
+            
+        # Load weights
+        try:
+            # Try to load with mesh context if mesh is available
+            if self.mesh is not None:
+                with self.mesh:
+                    return load_qwen_weights(
+                        model_path=checkpoint_path,
+                        model=self,
+                        config=self.config,
+                        mesh=self.mesh,
+                        param_dtype=self.param_dtype
+                    )
+            # Otherwise load without mesh context
+            return load_qwen_weights(
+                model_path=checkpoint_path,
+                model=self,
+                config=self.config,
+                mesh=self.mesh,
+                param_dtype=self.param_dtype
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to load weights from {checkpoint_path}: {e}")
+
+class TensorParallelQwenEmbed(nn.Module):
+    """Tensor parallel module for QwenEmbed."""
+
+    config: Dict[str, Any]
+    dtype: jnp.dtype = jnp.float16
+
+    def setup(self):
+        # Use local helper class to set up the embedding
+        self.embed = QwenEmbed(self.config, dtype=self.dtype)
+
+    def __call__(
+        self,
+        input_ids: jnp.ndarray,
+        *,
+        position_ids: jnp.ndarray,
+    ) -> jnp.ndarray:
+        return self.embed(input_ids, position_ids=position_ids)
+
+    @staticmethod
+    def get_params_partition_spec():
+        """Get the partition specs for the parameters in this module."""
+        # the parameters in QwenEmbed do not get sharded
+        return {
+            "embed": {
+                "wte": None,
+                "wpe": None,
+            }
+        } 

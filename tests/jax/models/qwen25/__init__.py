@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-JAX implementation of the Qwen2.5-7B model with tensor parallelism.
+Qwen2.5 model implementation for tensor parallelism in JAX/FLAX.
 """
 
 import collections
@@ -25,9 +25,10 @@ from .tensor_parallel import (
     TensorParallelQwenAttention,
     TensorParallelQwenMLP,
     TensorParallelQwenTransformerBlock,
-    TensorParallelQwen2Model,
     TensorParallelQwen2ForCausalLM,
+    TensorParallelQwen2Model,
     create_device_mesh,
+    get_partition_specs,
 )
 
 from .config import (
@@ -37,6 +38,7 @@ from .config import (
     supported_mesh_configs,
     get_qwen2_7b_config,
     get_small_config,
+    create_device_mesh as config_create_device_mesh,
 )
 
 from .weight_loading import (
@@ -204,6 +206,9 @@ def get_model(
         model_class = MODEL_MAPPING[model_type]
         return model_class(config, **kwargs)
 
+
+# Version
+__version__ = "0.1.0"
 
 __all__ = [
     # Model implementation

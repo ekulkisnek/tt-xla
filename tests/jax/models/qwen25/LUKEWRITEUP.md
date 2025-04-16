@@ -32,3 +32,7 @@ ok now it wrote 3 test scripts that look like they might be good.
 
 idk what they do tho.
 new tabs?
+
+
+15.4.25
+it was using regex insead of the method, changed that
