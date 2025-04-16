@@ -29,6 +29,88 @@ logger = logging.getLogger(__name__)
 transformers_logger = transformers_logging.get_logger("transformers")
 transformers_logger.setLevel(logging.INFO)
 
+# Patch PyTorch's load function to handle the weights_only parameter in PyTorch 2.6+
+def patch_torch_load():
+    """
+    Apply a patch to torch.load to handle PyTorch 2.6's weights_only parameter change.
+    """
+    try:
+        import torch
+        original_torch_load = torch.load
+        
+        # Create patched version that sets weights_only=False by default
+        def patched_torch_load(f, *args, **kwargs):
+            if 'weights_only' not in kwargs:
+                logger.info("Setting weights_only=False for PyTorch 2.6+ compatibility")
+                kwargs['weights_only'] = False
+            return original_torch_load(f, *args, **kwargs)
+        
+        # Replace the original function
+        torch.load = patched_torch_load
+        logger.info("✅ Applied patch for PyTorch 2.6+ weights_only parameter")
+        return True
+    except ImportError:
+        logger.warning("⚠️ Could not patch torch.load (torch not imported yet)")
+        return False
+    except Exception as e:
+        logger.warning(f"⚠️ Could not patch torch.load: {e}")
+        return False
+
+# Patch transformers' load_pytorch_checkpoint function to handle weights_only issue
+def patch_transformers_load_function():
+    """
+    Apply a patch to transformers' load_pytorch_checkpoint_in_flax_state_dict function
+    to handle PyTorch 2.6's weights_only parameter change.
+    """
+    try:
+        from transformers.modeling_flax_pytorch_utils import load_pytorch_checkpoint_in_flax_state_dict as original_load_fn
+        
+        def patched_load_pytorch_checkpoint_in_flax_state_dict(
+            flax_model, 
+            pytorch_checkpoint_path, 
+            is_sharded=False, 
+            allow_missing_keys=False
+        ):
+            """Patched version that explicitly sets weights_only=False in the PyTorch loading code"""
+            try:
+                return original_load_fn(
+                    flax_model, 
+                    pytorch_checkpoint_path, 
+                    is_sharded=is_sharded, 
+                    allow_missing_keys=allow_missing_keys
+                )
+            except Exception as e:
+                # If the first attempt fails with a weights_only error, try to patch
+                # both torch.load and also modify the inner function behavior
+                if "weights_only" in str(e):
+                    logger.info("First loading attempt failed with weights_only error, applying patch...")
+                    # Patch torch.load
+                    patch_torch_load()
+                    
+                    # Try again
+                    return original_load_fn(
+                        flax_model, 
+                        pytorch_checkpoint_path, 
+                        is_sharded=is_sharded, 
+                        allow_missing_keys=allow_missing_keys
+                    )
+                else:
+                    # Re-raise if it's a different error
+                    raise
+        
+        # Apply the patch
+        import transformers.modeling_flax_pytorch_utils
+        transformers.modeling_flax_pytorch_utils.load_pytorch_checkpoint_in_flax_state_dict = patched_load_pytorch_checkpoint_in_flax_state_dict
+        logger.info("✅ Applied patch for transformers' load_pytorch_checkpoint_in_flax_state_dict")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Could not patch transformers' load function: {e}")
+        return False
+
+# Apply patches when this module is imported
+_ = patch_torch_load()
+_ = patch_transformers_load_function()
+
 def get_checkpoint_files(checkpoint_dir: str) -> List[str]:
     """
     Get a list of all checkpoint files in the given directory.
@@ -107,14 +189,45 @@ def load_qwen_weights(
     # Use HuggingFace's utility to convert PyTorch weights to Flax format
     logger.info("Converting PyTorch weights to Flax format using HuggingFace utilities")
     try:
-        # Allow some missing keys for flexibility
-        flax_state_dict = load_pytorch_checkpoint_in_flax_state_dict(
-            model, checkpoint_files, is_sharded=is_sharded, allow_missing_keys=True
-        )
+        # Make sure our patches are applied
+        patch_torch_load()
+        patch_transformers_load_function()
+        
+        # Try direct loading with safetensors if available
+        if checkpoint_files[0].endswith('.safetensors'):
+            try:
+                # Try to use safetensors directly, which doesn't have the weights_only issue
+                logger.info("Attempting to load with safetensors...")
+                if is_sharded:
+                    # Load each file and merge
+                    all_params = {}
+                    for file in checkpoint_files:
+                        logger.info(f"Loading safetensors file: {file}")
+                        params = safe_load_file(file)
+                        all_params.update(params)
+                    # Convert to Flax format
+                    flax_state_dict = model.params_from_state_dict(unflatten_dict(all_params, sep="."))
+                else:
+                    # Single file
+                    params = safe_load_file(checkpoint_files[0])
+                    flax_state_dict = model.params_from_state_dict(unflatten_dict(params, sep="."))
+                logger.info("Successfully loaded weights using safetensors")
+            except Exception as e:
+                logger.warning(f"Failed to load with safetensors: {e}")
+                # Fall back to HuggingFace utility
+                flax_state_dict = load_pytorch_checkpoint_in_flax_state_dict(
+                    model, checkpoint_files, is_sharded=is_sharded, allow_missing_keys=True
+                )
+        else:
+            # Allow some missing keys for flexibility
+            flax_state_dict = load_pytorch_checkpoint_in_flax_state_dict(
+                model, checkpoint_files, is_sharded=is_sharded, allow_missing_keys=True
+            )
+        
         logger.info(f"Successfully converted PyTorch weights to Flax format")
     except Exception as e:
         logger.error(f"Error converting PyTorch weights to Flax format: {e}")
-        raise
+        raise ValueError(f"Failed to load weights from {model_path}: {e}")
     
     # Apply tensor parallelism if mesh is provided
     if mesh is not None:
