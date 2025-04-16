@@ -12,6 +12,8 @@ cd to qwen25
 source venv/bin/activate
 export XLA_FLAGS="--xla_force_host_platform_device_count=8"
 python verify_qwen25_1x8.py --model_path /Users/lu/Documents/tt-bounty-1/qwen2.5-7b
+python verify_qwen25_1x8.py --model_path /root/tt-xla/tests/jax/models/qwen25/qwen25-weights
+
 
 For small model testing (only if needed):
 python verify_qwen25_1x8.py --use_demo_model --small_model

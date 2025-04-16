@@ -93,3 +93,17 @@ tests/jax/models/qwen25-weights/model-00001-of-00004.safetensors
 tests/jax/models/qwen25-weights/model-00003-of-00004.safetensors
 tests/jax/models/qwen25-weights/model-00002-of-00004.safetensors
 tests/jax/models/qwen25-weights/model-00004-of-00004.safetensors
+tests/jax/models/qwen25/qwen25-weights/model-00001-of-00004.safetensors
+tests/jax/models/qwen25/qwen25-weights/model-00002-of-00004.safetensors
+tests/jax/models/qwen25/qwen25-weights/model-00003-of-00004.safetensors
+tests/jax/models/qwen25/qwen25-weights/model-00004-of-00004.safetensors
+tests/jax/models/qwen25/qwen25-weights/vocab.json
+tests/jax/models/qwen25/qwen25-weights/tokenizer.json
+tests/jax/models/qwen25/qwen25-weights/.gitattributes
+tests/jax/models/qwen25/qwen25-weights/config.json
+tests/jax/models/qwen25/qwen25-weights/generation_config.json
+tests/jax/models/qwen25/qwen25-weights/LICENSE
+tests/jax/models/qwen25/qwen25-weights/merges.txt
+tests/jax/models/qwen25/qwen25-weights/model.safetensors.index.json
+tests/jax/models/qwen25/qwen25-weights/README.md
+tests/jax/models/qwen25/qwen25-weights/tokenizer_config.json

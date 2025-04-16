@@ -8,9 +8,14 @@ Verification script to confirm that the Qwen2.5-7B model supports tensor paralle
 across all required mesh shapes: 2x4, 1x8, 1x32, 8x4.
 This is a requirement for the bounty.
 
+Weights download
+huggingface-cli download Qwen/Qwen2.5-7B --local-dir . --local-dir-use-symlinks False
+
 Usage
 cd to qwen25
+? python3 -m venv venv
 source venv/bin/activate
+pip install numpy jax flax transformers tqdm safetensors
 export XLA_FLAGS="--xla_force_host_platform_device_count=32"
 python /Users/lu/Documents/b1-understanding/tt-xla/tests/jax/models/qwen25/verify_qwen25_tp.py --model_path /Users/lu/Documents/b1-understanding/tt-xla/tests/jax/models/qwen25
 

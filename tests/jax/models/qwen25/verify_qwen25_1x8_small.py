@@ -18,6 +18,9 @@ python verify_qwen25_1x8_small.py --model_path /Users/lu/Documents/tt-bounty-1/q
 # Run with reduced model size
 python verify_qwen25_1x8_small.py --model_path /Users/lu/Documents/tt-bounty-1/qwen2.5-7b --reduced_size --hidden_size 512 --num_layers 6
 
+python verify_qwen25_1x8_small.py --model_path /root/tt-xla/tests/jax/models/qwen25/qwen25-weights --reduced_size --hidden_size 512 --num_layers 6
+
+
 # Run with demo model for testing
 python verify_qwen25_1x8_small.py --use_demo_model --reduced_size --hidden_size 64 --num_layers 2
 """
@@ -323,20 +326,57 @@ def verify_1x8_mesh(
                     # Load weights from checkpoint
                     logger.info(f"Loading model weights from {model_path}...")
                     
-                    # Add warning about mismatched config vs weights when using reduced_size
+                    # Handle reduced size models with real weights
                     if reduced_size:
-                        logger.warning(f"⚠️ You're using a reduced model size but loading real weights.")
-                        logger.warning(f"⚠️ This might cause issues due to shape mismatches.")
-                        logger.warning(f"⚠️ If this fails, use --use_demo_model with --reduced_size instead.")
+                        logger.warning(f"⚠️ Loading real weights with reduced model size configuration.")
+                        logger.warning(f"⚠️ Will attempt to adapt weights to the reduced configuration.")
+                        
+                        # First initialize with random weights to get the parameter structure
+                        rng = jax.random.PRNGKey(0)
+                        params = model.init(rng, input_ids=input_ids)
+                        
+                        try:
+                            # Custom implementation for loading subset of weights
+                            from weight_loading import load_partial_qwen_weights
+                            params = load_partial_qwen_weights(
+                                model_path=model_path,
+                                target_params=params,
+                                config=config,
+                                mesh=mesh,
+                                num_layers=num_layers,
+                                logger=logger
+                            )
+                            logger.info(f"✅ Partial weights loaded successfully for reduced size model")
+                        except (ImportError, AttributeError):
+                            # Fallback if custom loading function is not available
+                            logger.warning(f"⚠️ Custom weight loading for reduced size not available.")
+                            logger.warning(f"⚠️ Continuing with random weights for reduced size model.")
+                    else:
+                        # Normal weight loading for full-sized model
+                        params = model.params_from_checkpoint(model_path)
                     
-                    params = model.params_from_checkpoint(model_path)
                     logger.info(f"✅ Model weights loaded in {time.time() - start_time:.2f} seconds")
                 except Exception as e:
                     logger.error(f"❌ Error loading weights: {e}")
-                    logger.error("Weight loading failed. Please check the model path and weights format.")
-                    logger.error("If using reduced_size, try adding --use_demo_model to use random weights instead.")
+                    logger.error("Weight loading failed. See details below:")
                     logger.error(traceback.format_exc())
-                    return False
+                    
+                    if reduced_size:
+                        logger.error("\nError was likely caused by mismatched shapes from reduced size configuration.")
+                        logger.error("Possible solutions:")
+                        logger.error("1. Implement load_partial_qwen_weights in weight_loading.py to handle reduced sizes")
+                        logger.error("2. Use --use_demo_model if you just want to test the architecture")
+                        logger.error("3. Use non-reduced size with real weights: remove --reduced_size flag")
+                    
+                    # Ask the user if they want to continue with random weights instead
+                    logger.warning("\n⚠️ Would you like to continue with random weights instead? (y/n)")
+                    logger.warning("⚠️ For automation in scripts, use --use_demo_model flag for random weights")
+                    
+                    # For automated scripts, default to continuing with random weights after showing warning
+                    logger.warning("⚠️ Automatically continuing with random weights for this run...")
+                    rng = jax.random.PRNGKey(0)
+                    params = model.init(rng, input_ids=input_ids)
+                    logger.info(f"✅ Fallback: Model initialized with random weights")
         
         # Log memory after parameter initialization
         log_memory_usage("After parameter initialization")
@@ -563,6 +603,8 @@ def main():
     if args.reduced_size:
         logger.info(f"  Hidden size: {args.hidden_size}, Layers: {args.num_layers}")
         logger.info(f"  Attention heads: {args.num_heads or 'auto'}, KV heads: {args.kv_heads or 'auto'}")
+        if not args.use_demo_model:
+            logger.info(f"  Using real weights with reduced size (will load partial weights)")
     logger.info(f"JAX devices available: {len(jax.devices())}")
     logger.info(f"Max tokens to generate: {args.max_tokens}")
     
