@@ -4,7 +4,7 @@ Run inference with the Qwen25 JAX model.
 
 source venv/bin/activate
 python run_inference.py --model_path /root/wrkdir/tt-xla/tests/jax/models/qwen25/qwen25-weights --prompt "Hello, how are you today?" --max_tokens 10 --output_file outputs/test_output.txt
-
+python run_inference.py --model_path /root/code/Qwen2.5-7B --prompt "Hello, how are you today?" --max_tokens 10 --output_file outputs/test_output.txt
 
 """
 

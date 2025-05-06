@@ -18,8 +18,11 @@ IMPROVEMENTS IN THIS VERSION:
 
 Usage:
 cd to qwen25
+
+python3 -m venv venv
 source venv/bin/activate
 pip install jax jaxlib flax transformers safetensors numpy einops tqdm datasets tensorboard
+
 export XLA_FLAGS="--xla_force_host_platform_device_count=8"
 
 # Auto-scale to the maximum possible model size (recommended first run)
