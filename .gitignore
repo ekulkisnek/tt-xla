@@ -19,6 +19,8 @@ env/
 venv/*
 !venv/activate
 !venv/install_ttmlir_requirements.sh
+# Ignore all virtual environments
+**/venv/
 .env.sh
 *.egg-info
 *.whl
