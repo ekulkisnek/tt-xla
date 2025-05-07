@@ -5,7 +5,7 @@ Run inference with the Qwen25 JAX model.
 source venv/bin/activate
 python run_inference.py --model_path /root/wrkdir/tt-xla/tests/jax/models/qwen25/qwen25-weights --prompt "Hello, how are you today?" --max_tokens 10 --output_file outputs/test_output.txt
 python run_inference.py --model_path /root/code/Qwen2.5-7B --prompt "Hello, how are you today?" --max_tokens 10 --output_file outputs/test_output.txt
-
+python3 run_inference.py --model_path /root/code/Qwen2.5-7B --prompt "Hi" --max_tokens 1 --dtype float16 --profile
 """
 
 import os
@@ -133,8 +133,13 @@ def transpose_if_needed(name, param):
     
     # Other attention and MLP weights need to be transposed
     if "weight" in name and ("proj" in name or "lm_head" in name):
-        # For attention and MLP weight matrices
-        logger.debug(f"Transposing weight matrix for {name}: {param.shape} -> {param.T.shape}")
+        # Special case for K and V projections that have a different shape than Q
+        if ("k_proj.weight" in name or "v_proj.weight" in name) and param.shape[0] != param.shape[1]:
+            # These parameters have shape [kv_dim, hidden_dim] but in JAX we expect [hidden_dim, kv_dim]
+            logger.debug(f"Transposing KV weight matrix for {name}: {param.shape} -> {jnp.transpose(param).shape}")
+            return jnp.transpose(param)
+        # For other attention and MLP weight matrices
+        logger.debug(f"Transposing weight matrix for {name}: {param.shape} -> {jnp.transpose(param).shape}")
         return jnp.transpose(param)
     
     return param
@@ -263,6 +268,43 @@ def print_stream(text, output_file=None):
     if output_file:
         with open(output_file, "a") as f:
             f.write(text)
+
+def validate_attention_shapes(params):
+    """Validate shapes of attention projection parameters."""
+    logger.info("Parameter keys: %s", list(params.keys()))
+    for key, value in params.items():
+        if isinstance(value, dict):
+            logger.info("Subkeys for %s: %s", key, list(value.keys()))
+    
+    # Expected shapes
+    expected_shapes = {
+        'self_attn.q_proj.weight': (3584, 3584),
+        'self_attn.k_proj.weight': (3584, 512),
+        'self_attn.v_proj.weight': (3584, 512),
+        'self_attn.o_proj.weight': (3584, 3584)
+    }
+    
+    # Find layers
+    layer_keys = [k for k in params.keys() if k.startswith('layers.')]
+    logger.info("Found layer keys: %s", layer_keys)
+    
+    for layer_key in layer_keys:
+        layer = params[layer_key]
+        layer_idx = int(layer_key.split('.')[1])
+        
+        for param_name, expected_shape in expected_shapes.items():
+            full_key = f"{layer_key}.{param_name}"
+            if full_key not in params:
+                logger.warning(f"Parameter {full_key} not found")
+                continue
+                
+            actual_shape = params[full_key].shape
+            if actual_shape != expected_shape:
+                raise ValueError(
+                    f"Layer {layer_idx}, {param_name}: "
+                    f"Expected shape {expected_shape}, got {actual_shape}"
+                )
+    return True
 
 def parse_args():
     """Parse command line arguments."""
@@ -533,6 +575,9 @@ def main():
                 for layer_key in [k for k in params["params"].keys() if k.startswith("layers_")][:2]:
                     layer_keys = list(params["params"][layer_key].keys())
                     logger.debug(f"Layer {layer_key} keys: {layer_keys}")
+        
+        # Validate attention projection shapes
+        validate_attention_shapes(params)
         
         # Prepare dummy input to warm up the model
         logger.info("Running model warm-up to compile functions...")

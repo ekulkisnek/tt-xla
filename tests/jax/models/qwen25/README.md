@@ -115,3 +115,75 @@ This implementation follows the license of the original Qwen2.5 model.
 ## Citation
 
 If you use this implementation in your work, please cite both this repository and the original Qwen2.5 model.
+
+# Qwen 2.5 Parameter Loading Fix
+
+This directory contains scripts for loading and testing the Qwen 2.5 model with JAX.
+
+## Issue Overview
+
+The original parameter loading logic in `run_inference.py` had an issue with the transposition of key (K) and value (V) projection weights. While query (Q) projections have shape (hidden_size, hidden_size), K and V projections have shape (kv_dim, hidden_size), where:
+
+- hidden_size = 3584
+- kv_dim = 512 (smaller than hidden_size due to grouped-query attention)
+
+When these weights were transposed without accounting for the different shapes, they resulted in incorrect dimensions that caused nonsensical model outputs.
+
+## Fix Description
+
+The fix modifies the `transpose_if_needed()` function in `run_inference.py` to handle K and V projections specifically:
+
+```python
+def transpose_if_needed(name, param):
+    """Transpose weight matrices if needed based on the parameter name."""
+    # Special case for embedding weights - Flax's nn.Embed expects (vocab_size, embedding_dim)
+    if "embed_tokens.weight" in name:
+        # Do not transpose embedding weights
+        return param
+    
+    # Other attention and MLP weights need to be transposed
+    if "weight" in name and ("proj" in name or "lm_head" in name):
+        # Special case for K and V projections that have a different shape than Q
+        if ("k_proj.weight" in name or "v_proj.weight" in name) and param.shape[0] != param.shape[1]:
+            # These parameters have shape [kv_dim, hidden_dim] but in JAX we expect [hidden_dim, kv_dim]
+            return jnp.transpose(param)
+        # For other attention and MLP weight matrices
+        return jnp.transpose(param)
+    
+    return param
+```
+
+This ensures that:
+1. K/V weights (shape [512, 3584]) are transposed to [3584, 512]
+2. Q weights (shape [3584, 3584]) are transposed to [3584, 3584]
+3. Embedding weights are not transposed
+4. Other linear weights are transposed as needed
+
+## Testing
+
+Two test scripts are provided:
+
+1. `test_parameters.py`: A detailed parameter analysis that examines shapes, statistics, and validates compatibility
+2. `test_run_inference.py`: A direct test of the parameter loading logic in `run_inference.py`
+
+To run the tests:
+
+```bash
+python3 tt-xla/tests/jax/models/qwen25/test_parameters.py --model_path /path/to/Qwen2.5-7B --debug
+python3 tt-xla/tests/jax/models/qwen25/test_run_inference.py --model_path /path/to/Qwen2.5-7B
+```
+
+## Running the Model
+
+After fixing the parameter loading, the model can be run with:
+
+```bash
+python3 tt-xla/tests/jax/models/qwen25/run_inference.py --model_path /path/to/Qwen2.5-7B --prompt "Hello, how are you today?" --max_tokens 100 --output_file outputs/test_output.txt
+```
+
+## Related Files
+
+- `run_inference.py`: Main inference script with the parameter loading fix
+- `test_parameters.py`: Enhanced parameter testing script
+- `test_run_inference.py`: Minimal test for the loading logic
+- `fix_run_inference.py`: Demonstration of the fix with detailed diagnostics
