@@ -8,13 +8,14 @@ Imports model from model.py and runs inference on simulated multi-device mesh.
 """
 
 import argparse
-import logging
-import psutil
 import gc
-import time
-from transformers import AutoTokenizer
-import os
 import json
+import logging
+import os
+import time
+
+import psutil
+from transformers import AutoTokenizer
 
 """
 Note: JAX and model imports are deferred until after environment flags are applied
@@ -196,13 +197,13 @@ def main():
     import jax.numpy as jnp
 
     globals()["jnp"] = jnp
-    from model import (
+    from model import (  # noqa: E402
         Qwen25ForCausalLM,
-        setup_device_mesh,
         load_params,
-        sample_next_token,
         mesh,
-    )  # noqa: E402
+        sample_next_token,
+        setup_device_mesh,
+    )
 
     globals()["sample_next_token"] = sample_next_token
 

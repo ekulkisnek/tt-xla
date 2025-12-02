@@ -6,16 +6,17 @@
 Core model implementation for Qwen2.5-7B with tensor parallelism in JAX/Flax.
 """
 
+import gc
+import os
+from typing import Any, Dict
+
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
-from jax.sharding import PartitionSpec as P
-from jax.experimental.shard_map import shard_map
 import numpy as np
+from flax import linen as nn
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
-import os
-import gc
-from typing import Dict, Any
 
 # Global mesh (set externally, e.g., in generate scripts)
 mesh = None

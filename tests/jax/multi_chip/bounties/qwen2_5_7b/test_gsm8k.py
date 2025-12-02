@@ -10,20 +10,22 @@ Usage: python test_gsm8k.py --model_path weights --num_samples 100 --single_devi
 """
 
 import argparse
+import re
+
 from datasets import load_dataset
 from transformers import AutoTokenizer
-import re
 
 """
 Note: JAX and model imports are deferred until after environment flags are applied
 to ensure device discovery honors CLI-provided settings.
 """
-import os
+import gc
 import json
 import logging
-import psutil
-import gc
+import os
 import time
+
+import psutil
 
 # Logging
 logging.basicConfig(
@@ -299,14 +301,14 @@ def main():
     # Defer imports until after env flags are set
     import jax
     import jax.numpy as jnp
-    from model import (
+    from model import (  # noqa: E402
         Qwen25ForCausalLM,
         load_params,
-        sample_next_token,
         make_causal_mask,
-        setup_device_mesh,
         mesh,
-    )  # noqa: E402
+        sample_next_token,
+        setup_device_mesh,
+    )
 
     globals()["jnp"] = jnp
     globals()["sample_next_token"] = sample_next_token
